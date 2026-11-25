@@ -1,0 +1,140 @@
+/**
+ * 宿主桥：同一套 UI 跑在三种容器里，这里判断"我在哪"并把能力对齐。
+ *
+ * - Tauri 桌面壳：window.__TAURI__.core.invoke / __TAURI_INTERNALS__.invoke
+ * - Android 壳：window.AndroidBridge（WebView addJavascriptInterface 注入）
+ * - 都没有：浏览器，全部回落 getDisplayMedia / 下载
+ */
+
+type Invoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+interface TauriGlobal {
+  __TAURI__?: { core?: { invoke?: Invoke } };
+  __TAURI_INTERNALS__?: { invoke?: Invoke };
+}
+
+interface AndroidBridgeLike {
+  isAndroid?: () => boolean;
+  hasCapture?: () => boolean;
+  hasOverlay?: () => boolean;
+  captureScreen?: () => string;
+  pinImage?: (dataUrl: string) => void;
+  savePng?: (dataUrl: string, suggestedName: string) => string;
+  hideSelf?: () => void;
+  requestScreenCapture?: () => void;
+  requestOverlayPermission?: () => void;
+}
+
+export type HostKind = 'web' | 'tauri' | 'android';
+
+export function desktopInvoke(): Invoke | null {
+  if (typeof window === 'undefined') return null;
+  const global = window as unknown as TauriGlobal;
+  return global.__TAURI__?.core?.invoke ?? global.__TAURI_INTERNALS__?.invoke ?? null;
+}
+
+export function androidBridge(): AndroidBridgeLike | null {
+  if (typeof window === 'undefined') return null;
+  const bridge = (window as unknown as { AndroidBridge?: AndroidBridgeLike }).AndroidBridge;
+  return bridge && typeof bridge.captureScreen === 'function' ? bridge : null;
+}
+
+export function hostKind(): HostKind {
+  if (androidBridge()) return 'android';
+  if (desktopInvoke()) return 'tauri';
+  return 'web';
+}
+
+/** 有原生宿主（桌面壳 / Android 壳），可以走系统截屏。 */
+export function isDesktop(): boolean {
+  return hostKind() !== 'web';
+}
+
+function dataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('无法创建画布'));
+        return;
+      }
+      ctx.drawImage(image, 0, 0);
+      resolve(canvas);
+    };
+    image.onerror = () => reject(new Error('无法解码原生命令返回的图像'));
+    image.src = dataUrl;
+  });
+}
+
+/** 原生整屏抓帧。浏览器环境返回 null。 */
+export async function nativeCaptureScreen(): Promise<HTMLCanvasElement | null> {
+  const bridge = androidBridge();
+  if (bridge?.captureScreen) {
+    if (bridge.hasCapture && !bridge.hasCapture()) {
+      // 首次使用：先拉系统授权，让用户允许后再点一次。
+      bridge.requestScreenCapture?.();
+      throw new Error('已请求屏幕录制授权，请在系统弹窗里允许后再点一次「开始捕捉」');
+    }
+    const payload = bridge.captureScreen();
+    if (typeof payload !== 'string' || !payload.startsWith('data:image')) {
+      throw new Error(payload || 'Android 壳没有返回图像，请检查屏幕录制授权');
+    }
+    return dataUrlToCanvas(payload);
+  }
+
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const payload = await invoke('capture_screen');
+  if (typeof payload !== 'string' || !payload.startsWith('data:image')) {
+    throw new Error('原生命令没有返回图像');
+  }
+  return dataUrlToCanvas(payload);
+}
+
+/** 贴图：桌面壳开置顶窗口，Android 添加悬浮窗，浏览器返回 false 由 UI 用页内浮层兜底。 */
+export async function nativePin(dataUrl: string): Promise<boolean> {
+  const bridge = androidBridge();
+  if (bridge?.pinImage) {
+    bridge.pinImage(dataUrl);
+    return true;
+  }
+  const invoke = desktopInvoke();
+  if (!invoke) return false;
+  await invoke('pin_image', { dataUrl });
+  return true;
+}
+
+/** 系统保存。返回最终路径；浏览器或用户取消返回 null。 */
+export async function nativeSave(dataUrl: string, suggested: string): Promise<string | null> {
+  const bridge = androidBridge();
+  if (bridge?.savePng) {
+    const saved = bridge.savePng(dataUrl, suggested);
+    return typeof saved === 'string' && saved ? saved : null;
+  }
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const saved = await invoke('save_png', { dataUrl, suggestedName: suggested });
+  return typeof saved === 'string' ? saved : null;
+}
+
+export async function nativeListWindows(): Promise<Array<{ title: string; id: number }>> {
+  const invoke = desktopInvoke();
+  if (!invoke) return [];
+  const rows = await invoke('list_windows');
+  return Array.isArray(rows) ? (rows as Array<{ title: string; id: number }>) : [];
+}
+
+/** 截图前藏起自己（对应「隐藏当前窗口」）。 */
+export async function nativeHideSelf(): Promise<void> {
+  const bridge = androidBridge();
+  if (bridge?.hideSelf) {
+    bridge.hideSelf();
+    return;
+  }
+  const invoke = desktopInvoke();
+  if (invoke) await invoke('hide_self');
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Stillframe 桌面壳能力：主窗口与所有贴图窗口共用",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-show",
+    "core:window:allow-set-focus",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "dialog:default",
+    "fs:default",
+    "global-shortcut:default"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Stillframe",
+  "version": "0.1.0",
+  "identifier": "app.stillframe.desktop",
+  "build": {
+    "beforeDevCommand": "npm --prefix .. run dev",
+    "beforeBuildCommand": "npm --prefix .. run build",
+    "devUrl": "http://127.0.0.1:24118",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Stillframe / 定格",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 960,
+        "minHeight": 620,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "shortDescription": "截图 / 长截图 / 录屏 / OCR / 翻译 三端开源工具",
+    "longDescription": "Stillframe 把区域截图、滚动长截图、区域录屏、提取文字与屏幕翻译做成一套可自托管的工具，网页端、桌面端、Android 端共用同一套界面。",
+    "category": "Utility",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  }
+}

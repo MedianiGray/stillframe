@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Stillframe Pin</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+
+      /* 贴图窗口：整块可拖拽，双击关闭。 */
+      #pin {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: none;
+        cursor: move;
+        -webkit-app-region: drag;
+      }
+
+      #hint {
+        position: fixed;
+        right: 6px;
+        bottom: 4px;
+        font: 11px/1.4 Consolas, monospace;
+        color: rgba(231, 236, 232, 0.45);
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <img id="pin" alt="" />
+    <span id="hint">双击关闭</span>
+    <script>
+      var img = document.getElementById('pin');
+
+      window.__stillframeShowPin = function () {
+        var data = window.__STILLFRAME_PIN__;
+        if (!data) return;
+        img.src = data;
+        img.style.display = 'block';
+      };
+
+      img.addEventListener('load', function () {
+        document.getElementById('hint').style.display = 'none';
+      });
+
+      img.addEventListener('dblclick', function () {
+        // Tauri 壳里走原生关闭；独立浏览器打开时退化为隐藏。
+        if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
+          window.__TAURI_INTERNALS__.invoke('plugin:window|close', { label: 'current' });
+        } else {
+          img.style.display = 'none';
+        }
+      });
+
+      // 页面先到、数据后到时也要能显示。
+      if (window.__STILLFRAME_PIN__) window.__stillframeShowPin();
+    </script>
+  </body>
+</html>

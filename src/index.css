@@ -1,0 +1,126 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-ink-950 text-paper font-sans antialiased;
+    overflow: hidden;
+  }
+
+  ::selection {
+    background: rgba(228, 160, 60, 0.28);
+  }
+
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #33443b transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: #33443b;
+    border-radius: 2px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  .rail-btn {
+    @apply relative flex h-10 w-10 items-center justify-center rounded-sm text-muted transition-colors;
+    @apply hover:bg-ink-750 hover:text-paper;
+  }
+
+  .rail-btn-active {
+    @apply bg-ink-750 text-amber;
+  }
+
+  .rail-btn-active::before {
+    content: '';
+    @apply absolute -left-2 top-1/2 h-6 w-[2px] -translate-y-1/2 bg-amber;
+  }
+
+  .panel {
+    @apply border border-ink-600/50 bg-ink-850;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-sm border border-ink-600 bg-ink-800 px-3 py-2 text-[13px] text-paper transition-colors;
+    @apply hover:border-ink-500 hover:bg-ink-750 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-accent {
+    @apply border-amber/70 bg-amber/15 text-amber hover:border-amber hover:bg-amber/25;
+  }
+
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-muted hover:bg-ink-750 hover:text-paper;
+  }
+
+  .label {
+    @apply font-mono text-[10px] uppercase tracking-[0.16em] text-muted;
+  }
+
+  .field {
+    @apply w-full rounded-sm border border-ink-600 bg-ink-900 px-3 py-2 text-[13px] text-paper outline-none;
+    @apply focus:border-amber/70;
+  }
+
+  .sprocket {
+    background-image: repeating-linear-gradient(
+      90deg,
+      rgba(231, 236, 232, 0.16) 0 6px,
+      transparent 6px 14px
+    );
+    height: 2px;
+  }
+
+  .stage-grid {
+    background-image: radial-gradient(rgba(231, 236, 232, 0.045) 1px, transparent 1px);
+    background-size: 26px 26px;
+  }
+
+  .frame-corner {
+    @apply pointer-events-none absolute h-4 w-4 border-amber/70;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
