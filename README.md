@@ -4,6 +4,8 @@
 
 > 项目缘起：QQ 桌面端右键菜单里的截图模块（截图 / 录屏 / 长截图 / 提取文字 / 屏幕翻译 / 隐藏当前窗口 / 自动保存）用起来顺手，但它被锁在聊天软件里，跨端也不成立。这个仓库把那组能力独立实现成可自托管、可二次开发的开源应用——**不含 QQ 的任何代码、图标或私有资源，全部逻辑重新实现**。
 
+![Stillframe 工作台](docs/overview.png)
+
 ![status](https://img.shields.io/badge/build-source--only-informational)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
