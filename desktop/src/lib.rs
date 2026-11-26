@@ -1,7 +1,7 @@
 //! 桌面壳：把网页端那套 UI 装进系统里，补上浏览器给不了的能力。
 //!
-//! 契约见 docs/ARCHITECTURE.md：前端只调四个命令
-//! `capture_screen` / `pin_image` / `save_png` / `list_windows`，
+//! 契约见 docs/ARCHITECTURE.md：前端只调 `capture_screen` / `pin_image` /
+//! `save_png` / `write_shot` / `list_windows`，
 //! 其余（隐藏窗口、热键）走这里的 `hide_self` 与全局快捷键事件。
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -57,8 +57,29 @@ fn capture_screen() -> Result<String, String> {
 }
 
 /// 把贴图钉在屏幕上：独立、无边框、置顶、不进任务栏的窗口。
+/// 按原图比例定窗（上限 600×500），并限制同时存在 20 张（对应 QQ 的 nailLimit）。
 #[tauri::command]
-async fn pin_image(app: AppHandle, data_url: String) -> Result<(), String> {
+async fn pin_image(
+    app: AppHandle,
+    data_url: String,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<(), String> {
+    let pins = app
+        .webview_windows()
+        .keys()
+        .filter(|label| label.starts_with("pin-"))
+        .count();
+    if pins >= 20 {
+        return Err("贴图已达 20 张上限，请先关掉几张再钉新的".to_string());
+    }
+
+    let source_w = width.unwrap_or(600).max(1) as f64;
+    let source_h = height.unwrap_or(500).max(1) as f64;
+    let scale = (600.0 / source_w).min(500.0 / source_h).min(1.0);
+    let win_w = (source_w * scale).max(80.0);
+    let win_h = (source_h * scale).max(60.0);
+
     let label = format!(
         "pin-{}",
         std::time::SystemTime::now()
@@ -69,7 +90,7 @@ async fn pin_image(app: AppHandle, data_url: String) -> Result<(), String> {
     let payload = serde_json::to_string(&data_url).map_err(err)?;
     let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("pin.html".into()))
         .title("Stillframe Pin")
-        .inner_size(600.0, 500.0)
+        .inner_size(win_w, win_h)
         .min_inner_size(80.0, 60.0)
         .decorations(false)
         .transparent(true)
@@ -85,6 +106,33 @@ async fn pin_image(app: AppHandle, data_url: String) -> Result<(), String> {
     );
     window.eval(&script).map_err(err)?;
     Ok(())
+}
+
+fn sanitize_file_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .collect()
+}
+
+/// 静默落盘：写到 图片/Stillframe 目录，不弹系统对话框。
+#[tauri::command]
+async fn write_shot(data_url: String, suggested_name: String) -> Result<String, String> {
+    let bytes = decode_data_url(&data_url)?;
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "找不到用户目录，无法静默保存".to_string())?;
+    let dir = std::path::PathBuf::from(home)
+        .join("Pictures")
+        .join("Stillframe");
+    std::fs::create_dir_all(&dir).map_err(err)?;
+
+    let mut name = sanitize_file_name(&suggested_name);
+    if !name.to_lowercase().ends_with(".png") {
+        name.push_str(".png");
+    }
+    let target = dir.join(name);
+    std::fs::write(&target, bytes).map_err(err)?;
+    Ok(target.to_string_lossy().to_string())
 }
 
 /// 弹系统保存框，写 PNG。用户取消返回 None。
@@ -191,6 +239,7 @@ pub fn run() {
             capture_screen,
             pin_image,
             save_png,
+            write_shot,
             list_windows,
             hide_self,
             show_self

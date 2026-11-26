@@ -1,4 +1,7 @@
 import type { Settings } from './settings';
+import type { Glossary } from './glossary';
+
+export type { Glossary };
 
 export interface TranslateResult {
   text: string;
@@ -33,6 +36,7 @@ export function providerReady(settings: Settings): boolean {
 export async function translateText(
   text: string,
   settings: Settings,
+  glossary: Glossary = {},
 ): Promise<TranslateResult> {
   const trimmed = text.trim();
   if (!trimmed) throw new Error('没有可翻译的文字');
@@ -42,7 +46,7 @@ export async function translateText(
 
   switch (settings.translateProvider) {
     case 'openai':
-      return translateWithOpenAI(trimmed, settings);
+      return translateWithOpenAI(trimmed, settings, glossary);
     case 'deepl':
       return translateWithDeepL(trimmed, settings);
     case 'libre':
@@ -52,7 +56,16 @@ export async function translateText(
   }
 }
 
-async function translateWithOpenAI(text: string, settings: Settings): Promise<TranslateResult> {
+/** 只把原文里真正出现的术语塞进提示，避免无关词干扰模型。 */
+function glossaryPrompt(text: string, glossary: Glossary, limit = 40): string {
+  const hits = Object.entries(glossary)
+    .filter(([term]) => term && text.includes(term))
+    .slice(0, limit);
+  if (hits.length === 0) return '';
+  return `\nFollow this glossary strictly: ${hits.map(([term, value]) => `${term} => ${value}`).join('; ')}.`;
+}
+
+async function translateWithOpenAI(text: string, settings: Settings, glossary: Glossary): Promise<TranslateResult> {
   const endpoint = settings.translateEndpoint.replace(/\/+$/, '');
   const url = endpoint.endsWith('/chat/completions') ? endpoint : `${endpoint}/chat/completions`;
   const target = LANG_LABEL[settings.translateTarget] ?? settings.translateTarget;
@@ -68,7 +81,7 @@ async function translateWithOpenAI(text: string, settings: Settings): Promise<Tr
       messages: [
         {
           role: 'system',
-          content: `You are a translation engine. Translate the user's text into ${target}. Keep line breaks, keep technical terms, output the translation only.`,
+          content: `You are a translation engine. Translate the user's text into ${target}. Keep line breaks, keep technical terms, output the translation only.${glossaryPrompt(text, glossary)}`,
         },
         { role: 'user', content: text },
       ],

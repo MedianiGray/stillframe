@@ -18,7 +18,7 @@ interface WorkspaceProps {
   settings: Settings;
   onMode: (mode: ToolMode) => void;
   onOpenSettings: () => void;
-  onPin: (dataUrl: string) => void;
+  onPin: (dataUrl: string, width: number, height: number) => void;
   onLibraryChanged: () => void;
 }
 

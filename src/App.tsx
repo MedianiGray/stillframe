@@ -7,8 +7,12 @@ import { SettingsView } from './components/SettingsView';
 import { PinLayer, type PinItem } from './components/PinLayer';
 import { loadSettings, saveSettings } from './lib/settings';
 import { nativePin } from './lib/desktop';
+import { QQ_TEXT } from './lib/qqspec';
+import { useToast } from './components/Toasts';
 import type { Settings } from './lib/settings';
 import type { ToolMode, ViewId } from './lib/types';
+
+const PIN_LIMIT = 20;
 
 const TITLES: Record<ToolMode, { title: string; subtitle: string }> = {
   snap: { title: '捕捉台 · 截图', subtitle: '框选、标注、导出一步到位' },
@@ -19,6 +23,7 @@ const TITLES: Record<ToolMode, { title: string; subtitle: string }> = {
 };
 
 export default function App() {
+  const toast = useToast();
   const [view, setView] = useState<ViewId>('capture');
   const [mode, setMode] = useState<ToolMode>('snap');
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
@@ -55,14 +60,22 @@ export default function App() {
               settings={settings}
               onMode={(next) => setMode(next)}
               onOpenSettings={() => setView('settings')}
-              onPin={async (dataUrl) => {
+              onPin={async (dataUrl, width, height) => {
                 try {
-                  const pinned = await nativePin(dataUrl);
+                  const pinned = await nativePin(dataUrl, width, height);
                   if (pinned) return;
-                } catch {
-                  // fall through to in-app pin
+                } catch (error) {
+                  // 桌面壳拒绝（例如到了 20 张上限）时如实提示，不再静默退回页内贴图。
+                  toast(error instanceof Error ? error.message : QQ_TEXT.nailLimit, 'warn');
+                  return;
                 }
-                setPins((prev) => [...prev.slice(-2), { id: `pin_${Date.now()}`, dataUrl }]);
+                setPins((prev) => {
+                  if (prev.length >= PIN_LIMIT) {
+                    toast(QQ_TEXT.nailLimit, 'warn');
+                    return prev;
+                  }
+                  return [...prev, { id: `pin_${Date.now()}`, dataUrl, width, height }];
+                });
               }}
               onLibraryChanged={bumpLibrary}
             />

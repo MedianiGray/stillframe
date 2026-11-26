@@ -9,6 +9,7 @@ import {
   Languages,
   PenLine,
   Pin,
+  Redo2,
   Save,
   ScanText,
   ScrollText,
@@ -31,6 +32,7 @@ export interface QqToolbarState {
   filter: QqFilterId;
   count: number;
   canUndo: boolean;
+  canRedo: boolean;
 }
 
 export interface QqToolbarActions {
@@ -41,6 +43,7 @@ export interface QqToolbarActions {
   onFontSize: (size: number) => void;
   onFilter: (filter: QqFilterId) => void;
   onUndo: () => void;
+  onRedo: () => void;
   onSave: () => void;
   onLong: () => void;
   onTranslate: () => void;
@@ -209,6 +212,15 @@ export function QqToolbar({ state, actions, busy, allowRecord = true }: Props) {
         </button>
         <button type="button" title={QQ_TEXT.undo} className={BTN} disabled={!state.canUndo} onClick={actions.onUndo}>
           <Undo2 size={16} strokeWidth={1.7} />
+        </button>
+        <button
+          type="button"
+          title="重做 Ctrl+Y"
+          className={BTN}
+          disabled={!state.canRedo}
+          onClick={actions.onRedo}
+        >
+          <Redo2 size={16} strokeWidth={1.7} />
         </button>
 
         <span className="mx-1 h-[16px] w-px bg-white/15" />

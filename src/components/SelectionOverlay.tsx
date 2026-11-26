@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Maximize2, X } from 'lucide-react';
 import type { Rect } from '../lib/types';
+import { isSelectionUsable, resolveSelection } from '../lib/selection';
 import { QQ_TEXT } from '../lib/qqspec';
 
 interface SelectionOverlayProps {
@@ -25,6 +26,7 @@ const MAG_ZOOM = 8;
 export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: SelectionOverlayProps) {
   const [drag, setDrag] = useState<DragState | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const [mods, setMods] = useState({ alt: false, shift: false });
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
   const [probe, setProbe] = useState<{ hex: string; r: number; g: number; b: number } | null>(null);
   const magRef = useRef<HTMLCanvasElement | null>(null);
@@ -40,13 +42,8 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
 
   const rect = useMemo<Rect | null>(() => {
     if (!drag) return null;
-    return {
-      x: Math.min(drag.startX, drag.currentX),
-      y: Math.min(drag.startY, drag.currentY),
-      w: Math.abs(drag.currentX - drag.startX),
-      h: Math.abs(drag.currentY - drag.startY),
-    };
-  }, [drag]);
+    return resolveSelection(drag.startX, drag.startY, drag.currentX, drag.currentY, mods);
+  }, [drag, mods]);
 
   const scaleX = frame.width / Math.max(1, viewport.w);
   const scaleY = frame.height / Math.max(1, viewport.h);
@@ -61,12 +58,13 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
 
   const commit = useCallback(
     (area: Rect) => {
-      if (area.w < 6 || area.h < 6) return;
+      // 直线选区（Alt 吸附）允许只有 1px 的另一边，只要长边够长。
+      if (!isSelectionUsable(area)) return;
       onConfirm({
         x: Math.round(area.x * scaleX),
         y: Math.round(area.y * scaleY),
-        w: Math.round(area.w * scaleX),
-        h: Math.round(area.h * scaleY),
+        w: Math.max(1, Math.round(area.w * scaleX)),
+        h: Math.max(1, Math.round(area.h * scaleY)),
       });
     },
     [onConfirm, scaleX, scaleY],
@@ -109,15 +107,31 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
   }, [cursor, frame, scaleX, scaleY]);
 
   useEffect(() => {
+    const syncMods = (event: KeyboardEvent) => {
+      setMods({ alt: event.altKey, shift: event.shiftKey });
+    };
     const onKey = (event: KeyboardEvent) => {
+      syncMods(event);
       if (event.key === 'Escape') onCancel();
-      if (event.key === 'Enter' && rect && rect.w > 6) commit(rect);
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c' && probe) {
+      if (event.key === 'Enter' && rect && isSelectionUsable(rect)) commit(rect);
+      if (!probe) return;
+      const plainC = event.key.toLowerCase() === 'c' && !event.ctrlKey && !event.metaKey && !event.altKey;
+      const withModifier = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c';
+      // QQ 的提示是「按 c 复制色号」，这里兼容裸按 c 与 Ctrl/Cmd+C 两种习惯。
+      if (plainC || withModifier) {
         void navigator.clipboard?.writeText(probe.hex).catch(() => undefined);
       }
     };
+    const onKeyUp = (event: KeyboardEvent) => syncMods(event);
+    const onBlur = () => setMods({ alt: false, shift: false });
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
   }, [commit, onCancel, probe, rect]);
 
   const full = { x: 0, y: 0, w: viewport.w, h: viewport.h };
@@ -252,7 +266,7 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
         <button
           type="button"
           className="rounded-[2px] bg-[#12B7F5] px-2.5 py-1 text-[11.5px] font-medium text-[#04212E] hover:bg-[#3AC5FA] disabled:opacity-40"
-          disabled={!rect || rect.w < 6 || rect.h < 6}
+          disabled={!rect || !isSelectionUsable(rect)}
           onClick={() => rect && commit(rect)}
         >
           {QQ_TEXT.finish}

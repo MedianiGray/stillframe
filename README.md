@@ -216,7 +216,7 @@ OCR 用 tesseract.js 的单例 worker，换语言时 terminate 重建，避免 w
 
 升级范围、技术方案、排期与验收口径见 **[docs/UPGRADE-PLAN.md](docs/UPGRADE-PLAN.md)**（同一内容的 Word 版在 `docs/Stillframe-升级项目书-v1.0.docx`）。当前排期：
 
-- [ ] v0.2 可用性补齐（第 1–6 周）：桌面落盘、Alt 吸附与等比、贴图管理、识图段落
+- [ ] v0.2 可用性补齐（第 1–6 周）：桌面落盘、Alt 吸附与等比、贴图管理、识图段落（已完成主体，剩 E2E；见 [CHANGELOG.md](CHANGELOG.md)）
 - [ ] v0.3 录制与长图（第 7–14 周）：1080p30 录制直出 MP4、长截图自动滚动
 - [ ] v1.0 发布（第 15–20 周）：三端安装包、双语、性能与测试基线
 - [ ] 标注支持图层顺序与自由变换

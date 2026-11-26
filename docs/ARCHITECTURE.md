@@ -69,13 +69,16 @@ systemAudio / mic ──► AudioContext 混音 ──► audio track
 
 ## 原生壳契约
 
-前端只依赖四个命令，桌面壳与 Android 桥都必须提供同名能力：
+前端只依赖这些命令，桌面壳与 Android 桥都必须提供同名能力：
 
 | 命令 | 入参 | 返回 | 用途 |
 | --- | --- | --- | --- |
 | `capture_screen` | — | `data:image/png;base64,...` | 整屏抓帧，免授权 |
-| `pin_image` | `dataUrl` | — | 开一个置顶窗口贴图 |
+| `pin_image` | `dataUrl`, `width?`, `height?` | — | 按原图比例开置顶贴图窗口（上限 20 张） |
 | `save_png` | `dataUrl`, `suggestedName` | 保存路径 | 系统保存对话框 |
+| `write_shot` | `dataUrl`, `suggestedName` | 落盘路径 | 静默写入 `图片/Stillframe`，供自动保存 |
 | `list_windows` | — | `[{title, id}]` | 窗口列表（选区吸附/指定窗口截图） |
+
+保存策略（`src/lib/save.ts`）：桌面端手动保存走 `save_png`、自动保存走 `write_shot`；Android 两端都走 `Bridge.savePng`（相册，无弹窗）；网页端优先写已授权目录，未授权时手动保存退回下载、自动保存直接放弃。
 
 新增命令时同步改三处：`src/lib/desktop.ts`、`desktop/src/lib.rs`、`android/.../Bridge.kt`。

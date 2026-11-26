@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
-import { ArrowRight, Copy, Languages, Settings2, X } from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
+import { ArrowRight, Copy, Languages, Settings2, Upload, X } from 'lucide-react';
 import type { Settings } from '../../lib/settings';
 import { recognize } from '../../lib/ocr';
+import { GLOSSARY_KEY, loadGlossary, parseGlossary, type Glossary } from '../../lib/glossary';
 import { providerReady, translateText } from '../../lib/translate';
 import { useToast } from '../Toasts';
 
@@ -29,8 +30,43 @@ export function TranslatePanel({ image, settings, onClose, onOpenSettings }: Tra
   const [translated, setTranslated] = useState('');
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState('');
+  const [glossary, setGlossary] = useState<Glossary>(() => loadGlossary());
+  const sourceRef = useRef<HTMLTextAreaElement | null>(null);
+  const targetRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const syncLock = useRef(false);
   const preview = useMemo(() => image.toDataURL('image/png'), [image]);
   const ready = providerReady(settings);
+  const glossaryCount = Object.keys(glossary).length;
+
+  /** 双栏同步滚动：按滚动比例对齐，用锁避免来回触发。 */
+  const syncScroll = (from: 'source' | 'target') => {
+    if (syncLock.current) return;
+    const fromEl = from === 'source' ? sourceRef.current : targetRef.current;
+    const toEl = from === 'source' ? targetRef.current : sourceRef.current;
+    if (!fromEl || !toEl) return;
+    const fromMax = fromEl.scrollHeight - fromEl.clientHeight;
+    const toMax = toEl.scrollHeight - toEl.clientHeight;
+    if (fromMax <= 0 || toMax <= 0) return;
+    syncLock.current = true;
+    toEl.scrollTop = (fromEl.scrollTop / fromMax) * toMax;
+    requestAnimationFrame(() => {
+      syncLock.current = false;
+    });
+  };
+
+  const importGlossary = async (file: File) => {
+    const parsed = parseGlossary(await file.text());
+    const count = Object.keys(parsed).length;
+    if (count === 0) {
+      toast('没有解析到术语，请用「原词,译词」或 JSON 格式', 'warn');
+      return;
+    }
+    const next = { ...glossary, ...parsed };
+    setGlossary(next);
+    localStorage.setItem(GLOSSARY_KEY, JSON.stringify(next));
+    toast(`已导入 ${count} 条术语`, 'ok');
+  };
 
   const run = async () => {
     setBusy(true);
@@ -44,7 +80,7 @@ export function TranslatePanel({ image, settings, onClose, onOpenSettings }: Tra
         return;
       }
       setStage('翻译中');
-      const result = await translateText(ocr.text, { ...settings, translateTarget: target });
+      const result = await translateText(ocr.text, { ...settings, translateTarget: target }, glossary);
       setTranslated(result.text);
       toast(`已用 ${result.provider} 完成翻译`, 'ok');
     } catch (error) {
@@ -91,6 +127,34 @@ export function TranslatePanel({ image, settings, onClose, onOpenSettings }: Tra
             </button>
           )}
           {busy ? <span className="font-mono text-[11px] text-amber">{stage}</span> : null}
+          <span className="mx-1 h-[14px] w-px bg-white/15" />
+          <button type="button" className="btn btn-ghost !py-1.5" onClick={() => fileRef.current?.click()}>
+            <Upload size={13} /> 术语表 {glossaryCount > 0 ? `· ${glossaryCount}` : ''}
+          </button>
+          {glossaryCount > 0 ? (
+            <button
+              type="button"
+              className="font-mono text-[10px] text-muted hover:text-signal-warn"
+              onClick={() => {
+                setGlossary({});
+                localStorage.removeItem(GLOSSARY_KEY);
+                toast('已清空术语表', 'ok');
+              }}
+            >
+              清空
+            </button>
+          ) : null}
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,.tsv,.txt,.json"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = '';
+              if (file) void importGlossary(file);
+            }}
+          />
         </div>
 
         {!ready ? (
@@ -108,10 +172,12 @@ export function TranslatePanel({ image, settings, onClose, onOpenSettings }: Tra
               </button>
             </div>
             <textarea
+              ref={sourceRef}
               className="min-h-[180px] flex-1 resize-none bg-transparent p-3 text-[13px] leading-6 text-paper/85 outline-none"
               value={source}
               placeholder="识别到的原文"
               onChange={(event) => setSource(event.target.value)}
+              onScroll={() => syncScroll('source')}
             />
           </div>
 
@@ -123,10 +189,12 @@ export function TranslatePanel({ image, settings, onClose, onOpenSettings }: Tra
               </button>
             </div>
             <textarea
+              ref={targetRef}
               className="min-h-[180px] flex-1 resize-none bg-transparent p-3 text-[13px] leading-6 text-paper outline-none"
               value={translated}
               placeholder="翻译结果"
               onChange={(event) => setTranslated(event.target.value)}
+              onScroll={() => syncScroll('target')}
             />
           </div>
         </div>

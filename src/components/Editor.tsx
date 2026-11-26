@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { Annotation, AnnotationKind, Point, Rect } from '../lib/types';
 import { drawAnnotations, rectFromPoints } from '../lib/annotate';
-import { canvasToBlob, copyBlobToClipboard, downloadBlob, makeThumbnail, timestampName } from '../lib/image';
+import { canvasToBlob, copyBlobToClipboard, makeThumbnail, timestampName } from '../lib/image';
 import { putShot } from '../lib/storage';
-import { writeToDirectory } from '../lib/autosave';
+import { describeSave, saveBlob } from '../lib/save';
 import { applyFilter } from '../lib/filters';
 import { QQ_TEXT, type QqFilterId } from '../lib/qqspec';
 import { useToast } from './Toasts';
@@ -16,7 +16,7 @@ interface EditorProps {
   settings: Settings;
   onClose: () => void;
   onSaved: () => void;
-  onPin: (dataUrl: string) => void;
+  onPin: (dataUrl: string, width: number, height: number) => void;
   /** 从工具栏继续做长截图 / 识图 / 翻译 / 录屏，都会把当前成图带过去。 */
   onLong?: (image: HTMLCanvasElement) => void;
   onOcr?: (image: HTMLCanvasElement) => void;
@@ -193,7 +193,7 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
   }, [annotations, base, image]);
 
   const persist = useCallback(
-    async (blob: Blob) => {
+    async (blob: Blob, filename: string) => {
       await putShot({
         id: `img_${Date.now()}`,
         kind: 'image',
@@ -205,13 +205,14 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
         thumb: makeThumbnail(base, 240),
       });
       if (settings.autoSaveEnabled) {
-        const saved = await writeToDirectory(blob, timestampName('stillframe', settings.imageFormat === 'jpeg' ? 'jpg' : 'png'));
-        if (!saved) toast('自动保存目录未授权，已只存入图库', 'warn');
+        const result = await saveBlob(blob, filename, 'auto');
+        if (!result.ok && result.via !== 'canceled') {
+          toast(`${describeSave(result)}，已只存入图库`, 'warn');
+        }
       }
       onSaved();
-      toast('已存入图库', 'ok');
     },
-    [base, image, onSaved, settings.autoSaveEnabled, settings.imageFormat, toast],
+    [base, image, onSaved, settings.autoSaveEnabled, toast],
   );
 
   const copyOut = useCallback(async () => {
@@ -237,9 +238,11 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
     try {
       const format = settings.imageFormat;
       const ext = format === 'jpeg' ? 'jpg' : 'png';
+      const filename = timestampName('stillframe', ext);
       const blob = await canvasToBlob(compose(), format, settings.jpegQuality);
-      downloadBlob(blob, timestampName('stillframe', ext));
-      await persist(blob);
+      const result = await saveBlob(blob, filename, 'manual');
+      if (result.via !== 'canceled') await persist(blob, filename);
+      toast(result.ok ? `${describeSave(result)} · 已存入图库` : describeSave(result), result.ok ? 'ok' : 'warn');
     } catch (error) {
       toast(error instanceof Error ? error.message : '保存截图失败', 'warn');
     } finally {
@@ -267,6 +270,13 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
         event.preventDefault();
         if (event.shiftKey) setIndex((prev) => Math.min(history.length - 1, prev + 1));
         else setIndex((prev) => Math.max(0, prev - 1));
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+        // Ctrl+Y 重做：和 Ctrl+Shift+Z 等价，照顾 Windows 习惯。
+        event.preventDefault();
+        setIndex((prev) => Math.min(history.length - 1, prev + 1));
+        return;
       }
     };
     window.addEventListener('keydown', onKey);
@@ -349,6 +359,7 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
               filter,
               count: annotations.length,
               canUndo: index > 0,
+              canRedo: index < history.length - 1,
             }}
             actions={{
               onTool: setTool,
@@ -358,13 +369,15 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
               onFontSize: setFontSize,
               onFilter: setFilter,
               onUndo: () => setIndex((prev) => Math.max(0, prev - 1)),
+              onRedo: () => setIndex((prev) => Math.min(history.length - 1, prev + 1)),
               onSave: () => void handleSave(),
               onLong: () => onLong?.(compose()),
               onTranslate: () => onTranslate?.(compose()),
               onOcr: () => onOcr?.(compose()),
               onPin: () => {
                 try {
-                  onPin(compose().toDataURL('image/png'));
+                  const out = compose();
+                  onPin(out.toDataURL('image/png'), out.width, out.height);
                 } catch {
                   toast('贴图失败', 'warn');
                 }

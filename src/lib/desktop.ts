@@ -95,8 +95,11 @@ export async function nativeCaptureScreen(): Promise<HTMLCanvasElement | null> {
   return dataUrlToCanvas(payload);
 }
 
-/** 贴图：桌面壳开置顶窗口，Android 添加悬浮窗，浏览器返回 false 由 UI 用页内浮层兜底。 */
-export async function nativePin(dataUrl: string): Promise<boolean> {
+/**
+ * 贴图：桌面壳开置顶窗口，Android 添加悬浮窗，浏览器返回 false 由 UI 用页内浮层兜底。
+ * width / height 传原图尺寸，桌面壳据此按比例定窗（此前固定 600×500 会把图拉变形）。
+ */
+export async function nativePin(dataUrl: string, width?: number, height?: number): Promise<boolean> {
   const bridge = androidBridge();
   if (bridge?.pinImage) {
     bridge.pinImage(dataUrl);
@@ -104,7 +107,7 @@ export async function nativePin(dataUrl: string): Promise<boolean> {
   }
   const invoke = desktopInvoke();
   if (!invoke) return false;
-  await invoke('pin_image', { dataUrl });
+  await invoke('pin_image', { dataUrl, width, height });
   return true;
 }
 
@@ -118,6 +121,19 @@ export async function nativeSave(dataUrl: string, suggested: string): Promise<st
   const invoke = desktopInvoke();
   if (!invoke) return null;
   const saved = await invoke('save_png', { dataUrl, suggestedName: suggested });
+  return typeof saved === 'string' ? saved : null;
+}
+
+/** 静默落盘：桌面壳写到 图片/Stillframe，不弹框。浏览器返回 null。 */
+export async function nativeWriteShot(dataUrl: string, suggested: string): Promise<string | null> {
+  const bridge = androidBridge();
+  if (bridge?.savePng) {
+    const saved = bridge.savePng(dataUrl, suggested);
+    return typeof saved === 'string' && saved.startsWith('ERR:') ? null : saved || null;
+  }
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const saved = await invoke('write_shot', { dataUrl, suggestedName: suggested });
   return typeof saved === 'string' ? saved : null;
 }
 

@@ -24,6 +24,8 @@ export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
   const toast = useToast();
   const [lang, setLang] = useState(settings.ocrLang || 'chi_sim+eng');
   const [text, setText] = useState('');
+  const [paragraphs, setParagraphs] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<'flow' | 'para'>('flow');
   const [confidence, setConfidence] = useState<number | null>(null);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('');
@@ -44,8 +46,9 @@ export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
         },
       });
       setText(result.text);
+      setParagraphs(result.paragraphs);
       setConfidence(result.confidence);
-      toast(result.text ? '识别完成' : '没有识别到文字', result.text ? 'ok' : 'warn');
+      toast(result.text ? `识别完成 · ${result.paragraphs.length} 段` : '没有识别到文字', result.text ? 'ok' : 'warn');
     } catch (error) {
       toast(error instanceof Error ? error.message : '识别失败，可能是语言包下载失败', 'warn');
     } finally {
@@ -126,15 +129,64 @@ export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col p-4">
-          <span className="label">识别结果</span>
-          <textarea
-            className="field mt-2 min-h-[200px] flex-1 resize-none !leading-6"
-            placeholder="识别结果会出现在这里，也可以直接改"
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-          />
+          <div className="flex items-center justify-between">
+            <span className="label">识别结果</span>
+            {paragraphs.length > 0 ? (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] ${viewMode === 'para' ? 'bg-amber/20 text-amber' : 'text-muted hover:text-paper'}`}
+                  onClick={() => setViewMode('para')}
+                >
+                  段落视图
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-[2px] px-1.5 py-0.5 font-mono text-[10px] ${viewMode === 'flow' ? 'bg-amber/20 text-amber' : 'text-muted hover:text-paper'}`}
+                  onClick={() => setViewMode('flow')}
+                >
+                  可编辑
+                </button>
+              </div>
+            ) : null}
+          </div>
+
+          {viewMode === 'para' && paragraphs.length > 0 ? (
+            <div className="mt-2 min-h-[200px] flex-1 space-y-1.5 overflow-auto border border-ink-600/40 bg-ink-950 p-2">
+              {paragraphs.map((paragraph, index) => (
+                <div
+                  key={`${index}-${paragraph.slice(0, 8)}`}
+                  className="group flex items-start gap-1.5 border-l border-amber/30 bg-ink-900/60 px-2 py-1.5"
+                >
+                  <span className="mt-0.5 shrink-0 font-mono text-[9px] text-muted/70">{index + 1}</span>
+                  <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-[12.5px] leading-5 text-paper/85">
+                    {paragraph}
+                  </p>
+                  <button
+                    type="button"
+                    className="shrink-0 font-mono text-[9px] text-muted opacity-0 transition group-hover:opacity-100 hover:text-paper"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText(paragraph);
+                      toast(`已复制第 ${index + 1} 段`, 'ok');
+                    }}
+                  >
+                    复制
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <textarea
+              className="field mt-2 min-h-[200px] flex-1 resize-none !leading-6"
+              placeholder="识别结果会出现在这里，也可以直接改"
+              value={text}
+              onChange={(event) => setText(event.target.value)}
+            />
+          )}
           <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-muted">
-            <span>{text.length} 字符</span>
+            <span>
+              {text.length} 字符{paragraphs.length > 0 ? ` · ${paragraphs.length} 段` : ''}
+            </span>
             <span>本地识别 · 不上传图片</span>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-1.5">
