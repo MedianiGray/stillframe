@@ -80,6 +80,9 @@ systemAudio / mic ──► AudioContext 混音 ──► audio track
 | `pin_image` | `dataUrl`, `width?`, `height?` | — | 按原图比例开置顶贴图窗口（上限 20 张） |
 | `save_png` | `dataUrl`, `suggestedName` | 保存路径 | 系统保存对话框 |
 | `write_shot` | `dataUrl`, `suggestedName` | 落盘路径 | 静默写入 `图片/Stillframe`，供自动保存 |
+| `scroll_at` | `x`, `y`, `notches` | — | 向目标窗口注入竖向滚轮，光标用完即复位（自动滚动长截图用） |
+| `start_recording` | `rect?`, `fps?`, `ffmpeg?` | 即将写入的 MP4 路径 | 起抓帧线程 + FFmpeg sidecar；`rect` 为全屏冻结图坐标，缺省录整屏 |
+| `stop_recording` | — | `{path,frames,seconds,fps,dropped}` | 停录、等 FFmpeg 收尾，回传实绩（不补帧，只如实计数） |
 | `list_windows` | — | `[{title, id}]` | 窗口列表（选区吸附/指定窗口截图） |
 
 保存策略（`src/lib/save.ts`）：桌面端手动保存走 `save_png`、自动保存走 `write_shot`；Android 两端都走 `Bridge.savePng`（相册，无弹窗）；网页端优先写已授权目录，未授权时手动保存退回下载、自动保存直接放弃。

@@ -61,3 +61,4 @@ _devlog*.txt
 .env
 .env.local
 .env.*.local
+tools/*/target/

@@ -11,6 +11,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
+mod recorder;
+
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -546,6 +548,160 @@ fn self_rect(window: tauri::WebviewWindow) -> Result<SelfRect, String> {
     })
 }
 
+// ---------- 桌面录制：抓帧线程 + FFmpeg 编码 ----------
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+struct Recording {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<Result<recorder::RecordingStats, String>>,
+}
+
+static RECORDING: std::sync::OnceLock<std::sync::Mutex<Option<Recording>>> =
+    std::sync::OnceLock::new();
+
+fn recording_slot() -> &'static std::sync::Mutex<Option<Recording>> {
+    RECORDING.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 抓帧循环：先抓一帧量尺寸、顺便当首帧（首帧到了才启动编码，避免片头空白），
+/// 之后按目标间隔抓屏、裁剪、写进编码器。落后三帧以上就重设基准，不做追赶式狂抓。
+fn record_loop(
+    rect: Option<RecordRect>,
+    fps: u32,
+    out: std::path::PathBuf,
+    ffmpeg: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<recorder::RecordingStats, String> {
+    let monitors = xcap::Monitor::all().map_err(err)?;
+    let monitor = monitors.into_iter().next().ok_or("没有检测到显示器")?;
+
+    let first = monitor.capture_image().map_err(err)?;
+    let (screen_w, screen_h) = (first.width(), first.height());
+
+    // libx264 的 yuv420p 不接受奇数宽高，选区统一收成偶数
+    let crop = match rect {
+        Some(r) => (
+            r.x.min(screen_w.saturating_sub(2)),
+            r.y.min(screen_h.saturating_sub(2)),
+            (r.width.max(2)) & !1,
+            (r.height.max(2)) & !1,
+        ),
+        None => (0, 0, screen_w & !1, screen_h & !1),
+    };
+    let (width, height) = (crop.2, crop.3);
+    if width < 16 || height < 16 {
+        return Err(format!("录制区域太小：{width}×{height}"));
+    }
+
+    let mut encoder = recorder::Encoder::start(&recorder::EncoderSpec {
+        width,
+        height,
+        fps,
+        out,
+        ffmpeg,
+        crf: 20,
+    })?;
+
+    let interval = Duration::from_nanos(1_000_000_000u64 / fps.max(1) as u64);
+    let mut next = std::time::Instant::now();
+    let mut pending = Some(first);
+    loop {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        let image = match pending.take() {
+            Some(frame) => frame,
+            None => monitor.capture_image().map_err(err)?,
+        };
+        let raw = image.into_raw();
+        let frame = recorder::crop_rgba(&raw, screen_w, screen_h, crop.0, crop.1, width, height)?;
+        encoder.push_frame(&frame)?;
+
+        next += interval;
+        let now = std::time::Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
+        } else if now.duration_since(next) > interval * 3 {
+            next = now;
+        }
+    }
+    encoder.finish()
+}
+
+/// FFmpeg 在哪：显式参数 → 环境变量 → 应用目录（含 sidecars/）→ PATH。
+/// Windows 上大多数人不会把 ffmpeg 加进 PATH，所以把「和 exe 放一起」当作一等公民。
+fn resolve_ffmpeg(explicit: Option<String>) -> String {
+    if let Some(path) = explicit {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+    if let Ok(path) = std::env::var("STILLFRAME_FFMPEG") {
+        if !path.trim().is_empty() {
+            return path;
+        }
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.to_path_buf()))
+    {
+        for name in ["ffmpeg.exe", "ffmpeg", "sidecars/ffmpeg.exe", "binaries/ffmpeg.exe"] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+    }
+    "ffmpeg".to_string()
+}
+
+#[tauri::command]
+fn start_recording(
+    rect: Option<RecordRect>,
+    fps: Option<u32>,
+    ffmpeg: Option<String>,
+) -> Result<String, String> {
+    let mut slot = recording_slot().lock().map_err(err)?;
+    if slot.is_some() {
+        return Err("已经在录制，先结束当前这段".to_string());
+    }
+    let fps = fps.unwrap_or(30).clamp(5, 60);
+    let out = recorder::recordings_dir().join(format!(
+        "录屏-{}.mp4",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    ));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let thread_out = out.clone();
+    let ffmpeg_bin = resolve_ffmpeg(ffmpeg);
+    let handle = std::thread::spawn(move || record_loop(rect, fps, thread_out, ffmpeg_bin, thread_stop));
+    *slot = Some(Recording { stop, handle });
+    Ok(out.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn stop_recording() -> Result<recorder::RecordingStats, String> {
+    let recording = recording_slot().lock().map_err(err)?.take();
+    let Some(rec) = recording else {
+        return Err("当前没有在录制".to_string());
+    };
+    rec.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    rec.handle
+        .join()
+        .map_err(|_| "录制线程异常退出".to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // --quick：只把快捷浮窗叫出来（可配合开机自启，日常不用展开主窗）。
@@ -567,6 +723,8 @@ pub fn run() {
             show_self,
             self_rect,
             scroll_at,
+            start_recording,
+            stop_recording,
             open_quick,
             close_quick,
             quick_action,

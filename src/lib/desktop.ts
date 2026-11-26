@@ -267,3 +267,35 @@ export async function onHostEvent(
     void internals.invoke?.('plugin:event|unlisten', { event, eventId: id });
   };
 }
+
+export interface NativeRecordingStats {
+  path: string;
+  frames: number;
+  seconds: number;
+  fps: number;
+  dropped: number;
+}
+
+/**
+ * 原生录制：录像由桌面壳的抓帧线程 + FFmpeg 完成，绕开 WebView 那套
+ * 「轮询抓帧再喂 MediaRecorder」的低帧率路径。返回即将写入的 MP4 路径。
+ *
+ * rect 用全屏冻结图的坐标（物理像素），与 capture_screen 的取景一致。
+ */
+export async function nativeStartRecording(
+  rect: { x: number; y: number; width: number; height: number },
+  fps = 30,
+): Promise<string | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const path = await invoke('start_recording', { rect, fps });
+  return typeof path === 'string' ? path : null;
+}
+
+/** 结束原生录制，等 FFmpeg 收尾后拿到实绩（帧数、时长、实际帧率、掉帧）。 */
+export async function nativeStopRecording(): Promise<NativeRecordingStats | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const stats = await invoke('stop_recording');
+  return stats && typeof stats === 'object' ? (stats as NativeRecordingStats) : null;
+}

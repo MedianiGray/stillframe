@@ -37,7 +37,7 @@
 | 标注编辑 | 七件套：矩形、椭圆、箭头、画刷、马赛克、文字、序号笔；12 色 QQ 原值调色板、1/3/7 三档线宽、模糊度、字号，悬浮工具条即点即用 |
 | 滤镜 | 原图、日光海岸、LOMO、旧照片、黑白照、素描、经典LOMO、彩虹、铜版画、拍立得、日系甜美、黄昏，十二项名称照搬 QQ 滤镜栏 |
 | 滚动长截图 | 逐屏「追加一屏」，行亮度签名自动找重叠；桌面壳支持自动滚动（向目标窗口注入滚轮，逐帧拼接，连续两帧无重叠即判到底），自身窗口压住选区时会自动隐藏再恢复；支持垂直/水平两个方向，命中失败可手动指定重叠 |
-| 区域录屏 | 把屏幕流按选区裁切到 canvas，混入系统声/麦克风 → MediaRecorder（VP9/Opus 优先）；录制中可用 QQ 录屏条那六件套（画刷/矩形/椭圆/箭头/文字/激光）标注，标注会合进成片 |
+| 区域录屏 | 桌面壳由 Rust 抓帧线程按 30 帧抓选区，原始帧管道喂给 FFmpeg（rawvideo → libx264 CRF 20）直出 MP4，落在 `图片/Stillframe`；网页端仍是 canvas 裁切 + MediaRecorder（VP9/Opus 优先，只能 WebM）。录制中可用 QQ 录屏条那六件套（画刷/矩形/椭圆/箭头/文字/激光）标注，标注目前只合进网页端成片 |
 | 提取文字 | tesseract.js 本地 OCR，识别引擎与中英语言包随站点内置（fast 版，中文包约 1.7MB），断网可用，结果可编辑后复制/导出；识别完会判读内容类型（正文 / 代码 / 表格 / 清单）并预选动作 |
 | 屏幕翻译 | 原文/译文双栏；支持 OpenAI 兼容接口、DeepL、LibreTranslate 三种 provider |
 | 贴图钉屏 | 截图钉在屏幕上，可拖拽、可缩放、可关闭（桌面壳内为真·置顶窗口） |
@@ -57,7 +57,7 @@
 | 区域截图 | ✅ 每次授权屏幕共享 | ✅ 系统截屏接口，免授权 | ✅ MediaProjection + 前台服务 | ⚠️ 仅相册导入 |
 | 标注 / 导出 | ✅ | ✅ | ✅ | ✅ |
 | 滚动长截图 | ✅ | ✅ | ✅ | ⚠️ 仅拼接相册图 |
-| 区域录屏 | ⚠️ 只能 WebM，30fps | ⚠️ 原生连续抓帧 3–5fps，可转 MP4 | ⚠️ 原生抓帧约 3fps | ⚠️ 受限 |
+| 区域录屏 | ⚠️ 网页端只能 WebM，30fps | ✅ 原生 30 帧直出 MP4（编码链已真跑，1080p 60 秒帧率待真机验收） | ⚠️ 原生抓帧约 3fps | ⚠️ 受限 |
 | 提取文字 | ✅ | ✅ | ✅ | ✅ |
 | 屏幕翻译 | ✅ 需自备 API Key | ✅ | ✅ | ✅ |
 | 贴图钉屏 | ❌ 不能置顶 | ✅ 独立置顶窗口 | ✅ 悬浮窗（需授权） | ❌ |
@@ -110,7 +110,7 @@ gradlew assembleDebug
 
 Android 壳用 `WebView` 加载 `assets/www/index.html` 并注入 `AndroidBridge`，权限流程为：通知权限 → 屏幕录制授权（MediaProjection）→ 悬浮窗权限（可选）。
 
-> **构建状态说明**：网页端 `tsc --noEmit` 零错误、`npm run build` 通过；`desktop/` 已在 Windows 上用 Rust 1.100 + MSVC 编译并真机验收（截图、窗口截图、取字、延时、快捷浮窗）；自动滚动与录制管线是代码完成、真机样本未跑够；`android/` 仍是未做编译验证的源码工程（本机无 JDK / Android SDK），首次构建若遇版本号或 API 变更，按报错调整依赖版本即可。
+> **构建状态说明**：网页端 `tsc --noEmit` 零错误、`npm run build` 通过；`desktop/` 已在 Windows 上用 Rust 1.100 + MSVC 编译并真机验收（截图、窗口截图、取字、延时、快捷浮窗）；自动滚动代码完成但 20 屏样本未跑够；录制管线的编码侧已在 Linux 上真跑（90 帧合成画面 → h264 MP4，时长 3.000s、帧数 90 与输入吻合），1080p 60 秒真机帧率待 Windows 验收；`android/` 仍是未做编译验证的源码工程（本机无 JDK / Android SDK），首次构建若遇版本号或 API 变更，按报错调整依赖版本即可。
 
 ## 与 QQ 截图模块的对照
 
@@ -169,9 +169,15 @@ stillframe/
 
 不用模板匹配（慢、对缩放敏感），而是把每一帧降采样成 32 列的灰度行签名，然后在 24–2400px 的候选区间里滑窗求平均绝对差，取最小且低于阈值（9）的偏移作为重叠高度。命中就按重叠高度拼，未命中按无重叠直接接并提示用户改手动重叠——宁可拼错让人看见，也不静默吞掉内容。
 
-### 录屏：选区裁切在 canvas 里做
+### 录屏：网页端在 canvas 里裁，桌面壳交给 FFmpeg
 
-`RegionRecorder` 把整屏流每帧按选区 `drawImage` 到离屏 canvas，`canvas.captureStream(fps)` 得到裁切后的视频轨，再用 `AudioContext` 把系统声与麦克风混成一条音轨，最后交给 `MediaRecorder`。这样既不需要服务端，也不用额外装 FFmpeg。
+网页端 `RegionRecorder` 把整屏流每帧按选区 `drawImage` 到离屏 canvas，`canvas.captureStream(fps)` 得到裁切后的视频轨，再用 `AudioContext` 把系统声与麦克风混成一条音轨，交给 `MediaRecorder`——不依赖服务端，也不用装 FFmpeg，代价是只能出 WebM。
+
+桌面壳改走原生：`start_recording` 起一个抓帧线程，`xcap` 按目标间隔抓选区，RGBA 原始帧直接写进 `ffmpeg -f rawvideo` 的 stdin，libx264 `veryfast` / CRF 20 编成 MP4。这样绕开了 WebView 里那条「轮询抓帧只有个位数帧率」的路，也让成片能直接播放和转发。结束时报实际帧数与掉帧，不粉饰。
+
+FFmpeg 的查找顺序：命令参数 → 环境变量 `STILLFRAME_FFMPEG` → 应用目录（`ffmpeg.exe`、`sidecars/ffmpeg.exe`、`binaries/ffmpeg.exe`）→ PATH。都找不到时，点开始录制会直接报错退出，不会静默录出一段空文件。
+
+编码这条链路可以脱离 GUI 单独验：`cargo run --manifest-path tools/recorder-check/Cargo.toml`——喂 90 帧合成画面给 FFmpeg，再用 `ffprobe` 核对编码、分辨率、帧数与时长；CI 里也有同名任务。
 
 ### OCR 与翻译都在本地做调度
 
@@ -206,6 +212,7 @@ OCR 用 tesseract.js 的单例 worker，换语言时 terminate 重建，避免 w
 
 ## 已知限制
 
+- **桌面壳原生录制本轮先只录画面**。声音（WASAPI 环回 + 麦克风 48kHz 混音）与录屏标注进成片是下一批；要带声音/带标注的成片，先用网页端录 WebM。
 - **网页端录屏只有 WebM**。浏览器 MediaRecorder 不支持直接出 MP4；要 MP4 请用桌面壳或在本地转码：`ffmpeg -i in.webm -c:v libx264 -crf 20 out.mp4`。
 - **网页端每次抓屏都要重新授权**，这是浏览器安全模型的硬约束，不是 bug。
 - **长截图的重叠识别依赖画面有横向纹理**。纯色/大面积渐变的页面可能识别失败，此时用面板里的手动重叠输入。

@@ -71,6 +71,21 @@ jobs:
         # 首次会拉取 xcap / tauri，耗时较长；失败时看日志定位依赖版本
         continue-on-error: true
 
+  recorder:
+    name: Recorder pipeline (real ffmpeg encode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/recorder-check
+      - name: Ensure ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # 不依赖 GTK/WebKit：这条链路只关心「帧进得去、MP4 出得来、帧数时长对得上」
+      - name: Encode self-check
+        run: cargo run --manifest-path tools/recorder-check/Cargo.toml
+
   android:
     name: Android shell (assembleDebug)
     runs-on: ubuntu-latest

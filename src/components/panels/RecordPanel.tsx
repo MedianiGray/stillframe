@@ -24,6 +24,12 @@ import { downloadBlob, timestampName } from '../../lib/image';
 import { putShot } from '../../lib/storage';
 import { writeToDirectory } from '../../lib/autosave';
 import { QQ_TEXT } from '../../lib/qqspec';
+import {
+  hostKind,
+  nativeStartRecording,
+  nativeStopRecording,
+  type NativeRecordingStats,
+} from '../../lib/desktop';
 import { useToast } from '../Toasts';
 
 type Pt = { x: number; y: number };
@@ -73,6 +79,11 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
   const [textDraft, setTextDraft] = useState<{ pos: Pt; sx: number; sy: number; value: string } | null>(null);
   const [soundOn, setSoundOn] = useState(session.audioTracks.length > 0);
   const [voiceOn, setVoiceOn] = useState(false);
+  // 桌面壳走原生 30 帧管线；网页端仍用画布 + MediaRecorder
+  const [nativeRecording, setNativeRecording] = useState(false);
+  const [nativeDone, setNativeDone] = useState<NativeRecordingStats | null>(null);
+
+  const nativeCapable = hostKind() === 'tauri';
 
   const w = Math.max(2, Math.round(rect.w));
   const h = Math.max(2, Math.round(rect.h));
@@ -88,6 +99,24 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
       micRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
+
+  // 面板被关掉时不能让录制线程在后台空转：卸载时兜底停一次
+  const nativeLiveRef = useRef(false);
+  useEffect(() => {
+    nativeLiveRef.current = nativeRecording;
+  }, [nativeRecording]);
+  useEffect(() => {
+    return () => {
+      if (nativeLiveRef.current) void nativeStopRecording().catch(() => {});
+    };
+  }, []);
+
+  // 原生录制没有 RegionRecorder 的 onTick，秒表自己走
+  useEffect(() => {
+    if (!nativeRecording) return;
+    const timer = window.setInterval(() => setSeconds((prev) => prev + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [nativeRecording]);
 
   /** 录制叠加层：箭头、方框、文字、激光都会进成片。 */
   const drawOverlay = (ctx: CanvasRenderingContext2D, cw: number, ch: number) => {
@@ -225,6 +254,26 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
   };
 
   const begin = async () => {
+    // 桌面壳：交给 Rust 抓帧 + FFmpeg。WebView 里轮询抓屏只有个位数帧率，
+    // 那条路在桌面端录不出可交付的片子（见 docs/UPGRADE-PLAN.md 5.2）。
+    if (nativeCapable) {
+      try {
+        const path = await nativeStartRecording(
+          { x: Math.round(rect.x), y: Math.round(rect.y), width: w, height: h },
+          30,
+        );
+        if (!path) throw new Error('桌面壳没有返回录制路径');
+        session.stop(); // 停掉预览轮询，把 CPU 让给录制线程
+        setSeconds(0);
+        setNativeDone(null);
+        setNativeRecording(true);
+        setRecording(true);
+        toast('开始录制（原生 30 帧，本轮先只录画面）', 'ok');
+      } catch (error) {
+        toast(error instanceof Error ? error.message : '无法开始原生录制', 'warn');
+      }
+      return;
+    }
     try {
       const audio = await buildAudio();
       const recorder = new RegionRecorder(session.video, {
@@ -244,6 +293,22 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
   };
 
   const stop = async () => {
+    if (nativeRecording) {
+      try {
+        const stats = await nativeStopRecording();
+        setNativeRecording(false);
+        setRecording(false);
+        if (!stats) throw new Error('没有拿到录制结果');
+        setNativeDone(stats);
+        const droppedNote = stats.dropped ? `，掉 ${stats.dropped} 帧` : '';
+        toast(`录制完成：${stats.seconds} 秒，实测 ${stats.fps} 帧/秒${droppedNote}`, stats.fps >= 24 ? 'ok' : 'warn');
+      } catch (error) {
+        setNativeRecording(false);
+        setRecording(false);
+        toast(error instanceof Error ? error.message : '停止录制失败', 'warn');
+      }
+      return;
+    }
     const recorder = recorderRef.current;
     if (!recorder) return;
     try {
@@ -427,8 +492,9 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
 
             <button
               type="button"
-              title={soundOn ? QQ_TEXT.soundOff : QQ_TEXT.soundOn}
-              className={`${BTN} ${soundOn ? BTN_ON : ''}`}
+              title={nativeCapable ? '原生录制本轮先只录画面，声音下一批补' : soundOn ? QQ_TEXT.soundOff : QQ_TEXT.soundOn}
+              disabled={nativeRecording}
+              className={`${BTN} ${soundOn ? BTN_ON : ''} disabled:opacity-35`}
               onClick={() => {
                 const next = !soundOn;
                 session.audioTracks.forEach((track) => {
@@ -442,8 +508,9 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
             </button>
             <button
               type="button"
-              title={voiceOn ? QQ_TEXT.voiceOff : QQ_TEXT.voiceOn}
-              className={`${BTN} ${voiceOn ? BTN_ON : ''}`}
+              title={nativeCapable ? '原生录制本轮先只录画面，声音下一批补' : voiceOn ? QQ_TEXT.voiceOff : QQ_TEXT.voiceOn}
+              disabled={nativeRecording}
+              className={`${BTN} ${voiceOn ? BTN_ON : ''} disabled:opacity-35`}
               onClick={async () => {
                 if (voiceOn) {
                   micRef.current?.getTracks().forEach((track) => track.stop());
@@ -483,6 +550,30 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
               </button>
             )}
           </div>
+        </div>
+      ) : null}
+
+      {nativeDone ? (
+        <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-[3px] bg-[#1F2226]/95 px-2.5 py-1.5 ring-1 ring-white/10">
+          <Video size={14} className="text-[#5FD3FF]" />
+          <span className="font-mono text-[11px] text-[#C7CDD3]">
+            {nativeDone.seconds.toFixed(1)}s · {nativeDone.fps}fps · {nativeDone.frames} 帧
+          </span>
+          <span className="max-w-[240px] truncate text-[11px] text-[#8A9199]" title={nativeDone.path}>
+            {nativeDone.path}
+          </span>
+          <button
+            type="button"
+            className="rounded-[2px] bg-[#12B7F5] px-2 py-1 text-[11.5px] text-[#04212E]"
+            onClick={() => {
+              navigator.clipboard
+                ?.writeText(nativeDone.path)
+                .then(() => toast('路径已复制，可直接粘到资源管理器', 'ok'))
+                .catch(() => toast('复制失败，请手动选中路径', 'warn'));
+            }}
+          >
+            复制路径
+          </button>
         </div>
       ) : null}
 

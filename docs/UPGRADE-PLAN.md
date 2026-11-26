@@ -176,6 +176,14 @@
 - 取字面板新增「译屏」直达翻译，省去退回主界面重选模式。
 - 验收方法记录：本机 125% 缩放，PrintWindow 截图前必须 `SetProcessDpiAwareness`，否则位图只覆盖逻辑尺寸（1194×818），会把正常布局误判为右侧溢出。
 
+**v0.3 录制第一批：桌面原生 30 帧管线（2026-11-27）**
+
+- 交付物：`desktop/src/recorder.rs`（FFmpeg 编码器 + `crop_rgba`）、`start_recording` / `stop_recording` 两条命令、前端桌面分支（`nativeStartRecording` / `nativeStopRecording`，`RecordPanel` 原生走 30 帧并显示 `秒 · fps · 帧数`）、README / CHANGELOG / ARCHITECTURE 同步。
+- 设计取舍：先抓一帧量尺寸并当首帧，首帧到了才开编码；选区宽高偶数化；掉帧不补、只如实计数；显式 `-an`，音频下一批。
+- 已验（Linux）：90 帧合成画面 → `ffprobe` 核对 h264 / 320×240 / `nb_frames=90` / `duration=3.000000`，裁剪长度与预期一致。
+- 未验：Windows 真机 1080p×60 秒帧率（目标 ≥28fps、丢帧 <2%）——需要在 Windows 上编译并跑真机，当前 GUI 会话桌面全黑的限制不影响录制（录制由 `xcap` + FFmpeg 走，不经 GUI 截图路径），下一轮补。
+- 未做：WASAPI 环回与麦克风混音、录屏标注进成片、FFmpeg sidecar 随包分发（现依赖 PATH 或显式传路径）。
+
 ### 4.3 v1.0 发布与治理
 
 **表8 v1.0 任务与验收**
