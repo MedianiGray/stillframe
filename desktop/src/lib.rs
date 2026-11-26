@@ -614,30 +614,96 @@ fn pick_encoder(ffmpeg: &str) -> &'static str {
 fn pace_frame(
     encoder: &mut recorder::Encoder,
     frame: &[u8],
-    next: &mut std::time::Instant,
-    interval: Duration,
-    now: std::time::Instant,
+    started: std::time::Instant,
+    fps: u32,
 ) -> Result<(), String> {
-    if *next > now {
-        std::thread::sleep(*next - now);
-        return Ok(());
-    }
-    // 落后了：补帧顶住时间轴。补帧本身也要耗时，所以每补一帧重读一次时钟。
+    let fps = fps.max(1) as f64;
+    // 绝对对账：目标帧数只由「已跑秒数 × 帧率」决定，不再维护节拍累加器。
+    // 累加器版本在忙时会连续补帧、把时间轴补超前——实测 15 秒录出 466 帧。
+    let target = (started.elapsed().as_secs_f64() * fps).floor() as u64;
     let mut filled = 0u8;
-    loop {
-        let probe = std::time::Instant::now();
-        if *next + interval > probe || filled >= 8 {
-            break;
-        }
+    while encoder.frames() < target && filled < 8 {
         encoder.push_repeat(frame)?;
-        *next += interval;
         filled += 1;
     }
-    let after = std::time::Instant::now();
-    if after > *next && after.duration_since(*next) > interval * 4 {
-        *next = after;
+    // 睡到下一个节拍点，帧率锁在 fps 上。
+    // 只剩几毫秒时不能用 sleep：Windows 的 sleep 粒度偏粗，3ms 常常只睡 1–2ms，
+    // 每帧欠一点累积下来帧率就偏高——实测 15 秒录出 465 帧、成片变长 3%。
+    let next_at = started + Duration::from_secs_f64(encoder.frames() as f64 / fps);
+    loop {
+        let now = std::time::Instant::now();
+        if now >= next_at {
+            break;
+        }
+        let rest = next_at - now;
+        if rest > Duration::from_millis(2) {
+            std::thread::sleep(rest - Duration::from_millis(1));
+        } else {
+            std::hint::spin_loop();
+        }
     }
     Ok(())
+}
+
+/// 找可用的麦克风：解析 `ffmpeg -f dshow -list_devices true` 的输出，取第一路 `(audio)`。
+/// 本机实测只有「麦克风阵列 (Synaptics SmartAudio HD)」，没有立体声混音端点——
+/// 系统声得另走 WASAPI 环回，见 docs/UPGRADE-PLAN.md §5.2。
+#[cfg(windows)]
+fn pick_microphone(ffmpeg: &str) -> Option<String> {
+    let output = std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-f",
+            "dshow",
+            "-list_devices",
+            "true",
+            "-i",
+            "dummy",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    // list_devices 的退出码非 0（dummy 输入必然失败），只看输出
+    let text = String::from_utf8_lossy(&output.stderr);
+    for line in text.lines() {
+        if !line.contains("(audio)") || line.contains("Alternative name") {
+            continue;
+        }
+        if let Some(start) = line.find('"') {
+            let rest = &line[start + 1..];
+            if let Some(end) = rest.find('"') {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 麦克风能不能真采：空编码跑 0.4 秒。设备被别的程序独占时这里失败，
+/// 那就当没有麦克风——不能让整段录制因为音频起不来。
+#[cfg(windows)]
+fn microphone_works(ffmpeg: &str, device: &str) -> bool {
+    std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "dshow",
+            "-i",
+            &format!("audio={device}"),
+            "-t",
+            "0.4",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// Windows 专用抓帧循环：直接 BitBlt 到 DIB 缓冲，像素零拷贝交给 FFmpeg。
@@ -649,6 +715,7 @@ fn record_loop(
     fps: u32,
     out: std::path::PathBuf,
     ffmpeg: String,
+    audio: Option<String>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     seconds_limit: Option<f64>,
 ) -> Result<recorder::RecordingStats, String> {
@@ -680,18 +747,20 @@ fn record_loop(
         pix_fmt: "bgra",
         preset: "ultrafast",
         codec,
+        audio: audio.clone(),
     })?;
-    encoder.set_backend(format!("{}+{}", grabber.backend(), codec));
+    let audio_tag = if audio.is_some() { "+mic" } else { "" };
+    encoder.set_backend(format!("{}+{}{}", grabber.backend(), codec, audio_tag));
 
-    let interval = Duration::from_nanos(1_000_000_000u64 / fps.max(1) as u64);
     let started = std::time::Instant::now();
-    let mut next = started;
     loop {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
         if let Some(limit) = seconds_limit {
-            if started.elapsed().as_secs_f64() >= limit {
+            // 时间与帧数双闸：补帧会让帧数偶尔超前节拍，只看时钟会实录超长
+            let max_frames = (limit * fps as f64).round().max(1.0) as u64;
+            if encoder.frames() >= max_frames || started.elapsed().as_secs_f64() >= limit {
                 break;
             }
         }
@@ -699,12 +768,20 @@ fn record_loop(
         let frame = grabber.grab()?;
         encoder.note_grab(t0.elapsed());
         encoder.push_frame(frame)?;
-        next += interval;
-        let now = std::time::Instant::now();
-        pace_frame(&mut encoder, frame, &mut next, interval, now)?;
+        pace_frame(&mut encoder, frame, started, fps)?;
     }
     // 尾巴补齐：按真实跑秒数把缺的帧补上，避免成片比实际录制短
+    // 先把结束时刻钉住：补帧和等 FFmpeg 收尾都要花时间，不能算进录制时长
+    // 尾巴补齐：按真实跑秒数把缺的帧补上，避免成片比实际录制短
+    // 时间要先取：mark_end 里停麦克风最多要等半秒，算进去会多补十几帧。
     let elapsed = started.elapsed().as_secs_f64();
+    encoder.mark_end();
+    log_line(&format!(
+        "[record] frames={} elapsed={elapsed:.3} fps={fps} budget={:.0} backend={}",
+        encoder.frames(),
+        elapsed * fps as f64,
+        grabber.backend()
+    ));
     if let Ok(tail) = grabber.grab() {
         let _ = encoder.pad_to(elapsed, tail);
     }
@@ -718,6 +795,7 @@ fn record_loop(
     fps: u32,
     out: std::path::PathBuf,
     ffmpeg: String,
+    _audio: Option<String>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     seconds_limit: Option<f64>,
 ) -> Result<recorder::RecordingStats, String> {
@@ -753,17 +831,19 @@ fn record_loop(
         pix_fmt: "rgba",
         preset: "veryfast",
         codec: "libx264",
+        audio: None,
     })?;
 
-    let interval = Duration::from_nanos(1_000_000_000u64 / fps.max(1) as u64);
-    let mut next = std::time::Instant::now();
+    let started = std::time::Instant::now();
     let mut pending = Some(first);
     loop {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
         if let Some(limit) = seconds_limit {
-            if started.elapsed().as_secs_f64() >= limit {
+            // 时间与帧数双闸：补帧会让帧数偶尔超前节拍，只看时钟会实录超长
+            let max_frames = (limit * fps as f64).round().max(1.0) as u64;
+            if encoder.frames() >= max_frames || started.elapsed().as_secs_f64() >= limit {
                 break;
             }
         }
@@ -776,11 +856,9 @@ fn record_loop(
         let frame = recorder::crop_rgba(&raw, screen_w, screen_h, crop.0, crop.1, width, height)?;
         encoder.note_grab(t0.elapsed());
         encoder.push_frame(&frame)?;
-
-        next += interval;
-        let now = std::time::Instant::now();
-        pace_frame(&mut encoder, &frame, &mut next, interval, now)?;
+        pace_frame(&mut encoder, &frame, started, fps)?;
     }
+    encoder.mark_end();
     encoder.finish()
 }
 
@@ -816,6 +894,7 @@ fn start_recording(
     rect: Option<RecordRect>,
     fps: Option<u32>,
     ffmpeg: Option<String>,
+    mic: Option<bool>,
 ) -> Result<String, String> {
     let mut slot = recording_slot().lock().map_err(err)?;
     if slot.is_some() {
@@ -833,7 +912,16 @@ fn start_recording(
     let thread_stop = stop.clone();
     let thread_out = out.clone();
     let ffmpeg_bin = resolve_ffmpeg(ffmpeg);
-    let handle = std::thread::spawn(move || record_loop(rect, fps, thread_out, ffmpeg_bin, thread_stop, None));
+    // 麦克风默认不带：录进别人的声音不是小事，只有用户勾了才采。
+    // 勾了但设备采不动（被占用 / 无权限）时静默退回纯画面，并在 backend 里看得出来。
+    let audio = if mic.unwrap_or(false) {
+        pick_microphone(&ffmpeg_bin).filter(|device| microphone_works(&ffmpeg_bin, device))
+    } else {
+        None
+    };
+    let handle = std::thread::spawn(move || {
+        record_loop(rect, fps, thread_out, ffmpeg_bin, audio, thread_stop, None)
+    });
     *slot = Some(Recording { stop, handle });
     Ok(out.to_string_lossy().to_string())
 }
@@ -876,11 +964,20 @@ pub fn run() {
                 }
             });
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // 可选：--probe-audio —— 同时采麦克风，验证音轨能不能进成片
+        let probe_audio = std::env::args().any(|arg| arg == "--probe-audio");
+        let ffmpeg_bin = resolve_ffmpeg(None);
+        let audio = if probe_audio {
+            pick_microphone(&ffmpeg_bin).filter(|device| microphone_works(&ffmpeg_bin, device))
+        } else {
+            None
+        };
         let result = record_loop(
             probe_rect,
             30,
             std::path::PathBuf::from(&out),
-            resolve_ffmpeg(None),
+            ffmpeg_bin,
+            audio,
             stop,
             Some(seconds),
         );

@@ -31,6 +31,9 @@ pub struct EncoderSpec {
     pub preset: &'static str,
     /// 编码器：`h264_qsv`（核显）或 `libx264`（软件）。
     pub codec: &'static str,
+    /// 麦克风的 DirectShow 设备名；`None` 表示这段只录画面。
+    /// 名字来自 `ffmpeg -f dshow -list_devices true -i dummy` 的枚举结果。
+    pub audio: Option<String>,
 }
 
 /// 一次录制的实绩：帧数、时长、实际帧率、估算掉帧数。
@@ -68,6 +71,13 @@ pub struct Encoder {
     repeats: u64,
     /// 抓帧 + 编码后端标识，只用于报表。
     backend: String,
+    /// 录制线程停下那一刻的时间。补帧、等 FFmpeg 收尾都会拖时间，
+    /// 真实时长必须在循环结束时就钉住，不能用 finish 时的 elapsed。
+    ended: Option<Instant>,
+    /// FFmpeg 路径，收尾时用来封装音频。
+    ffmpeg: String,
+    /// 麦克风录制进程、它的输入管道与 WAV 路径。分离进程才能保证停录时立即退出。
+    audio_child: Option<(Child, ChildStdin, String)>,
 }
 
 impl Encoder {
@@ -87,8 +97,57 @@ impl Encoder {
             &spec.fps.to_string(),
             "-i",
             "-",
-            "-an",
         ]);
+        // 音频单独起一个进程录 WAV，不接进编码器。
+        // 原因：dshow 是无限实时流，把麦克风当同一进程的第二输入，视频 stdin EOF 后
+        // FFmpeg 仍在等音频，`-shortest` 也不生效——实测停止时进程不退出，会把界面卡住。
+        // 分离之后视频进程照旧干净收尾，音频进程直接 kill，再用两个有限文件封装。
+        let audio_child = match &spec.audio {
+            Some(device) => {
+                let wav = format!("{}.mic.wav", spec.out.to_string_lossy());
+                let mut spawn = Command::new(&spec.ffmpeg);
+                spawn.args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "dshow",
+                    "-i",
+                    &format!("audio={device}"),
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "48000",
+                    "-f",
+                    "wav",
+                    &wav,
+                ]);
+                spawn
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .ok()
+                    .and_then(|mut child| {
+                        let stdin = child.stdin.take();
+                        // 等 WAV 真的开始落盘再启视频抓帧。dshow 打开设备要 1 秒上下，
+                        // 固定 sleep 靠不住——实测差 1.35 秒，音轨比画面短一截。
+                        let deadline = Instant::now() + std::time::Duration::from_secs(3);
+                        loop {
+                            if std::fs::metadata(&wav).map(|meta| meta.len() > 0).unwrap_or(false) {
+                                break;
+                            }
+                            if Instant::now() >= deadline {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        stdin.map(|stdin| (child, stdin, wav))
+                    })
+            }
+            None => None,
+        };
         // 硬件编码器优先（Windows 上由调用方探测后传入），CPU 让给抓帧；
         // 回退 libx264 时按 preset/crf 走软件编码。
         if spec.codec == "h264_qsv" {
@@ -114,6 +173,8 @@ impl Encoder {
                 "yuv420p",
             ]);
         }
+        // 视频进程不碰音频：有麦克风时音频走独立进程，最后再封装
+        cmd.arg("-an");
         cmd.args(["-movflags", "+faststart", "-y"]);
         cmd.arg(&spec.out);
         cmd.stdin(Stdio::piped())
@@ -137,7 +198,30 @@ impl Encoder {
             grab_micros: 0,
             repeats: 0,
             backend: "unknown".to_string(),
+            ended: None,
+            ffmpeg: spec.ffmpeg.clone(),
+            audio_child,
         })
+    }
+
+    /// 录制线程停止的时刻。要在补帧、收尾之前调用，否则统计里的秒数会变成
+    /// 「录制 + 补帧 + 等 FFmpeg」的总时间（实测把 20 秒录成 43 秒）。
+    pub fn mark_end(&mut self) {
+        self.ended = Some(Instant::now());
+        // 麦克风要跟着录制一起停，不能等补帧和收尾走完——那段时间它还在采，
+        // 实测多出 20 多秒，成片音轨比画面长一截。先发 q 让 FFmpeg 正常收尾（把缓冲
+        // 刷进 WAV），它不退再硬杀。
+        if let Some((child, stdin, _)) = self.audio_child.as_mut() {
+            let _ = stdin.write_all(b"q\n");
+            let _ = stdin.flush();
+            for _ in 0..20 {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    _ => std::thread::sleep(std::time::Duration::from_millis(25)),
+                }
+            }
+            let _ = child.kill();
+        }
     }
 
     /// 记下本次走的后端（例如 `dxgi+h264_qsv`），只用于报表和标定。
@@ -201,15 +285,73 @@ impl Encoder {
         let target_fps = self.target_fps;
         let path = self.path.clone();
         let started = self.started;
+        let real_seconds = self
+            .ended
+            .map(|end| end.duration_since(started).as_secs_f64())
+            .unwrap_or_else(|| started.elapsed().as_secs_f64());
         // 先关 stdin：FFmpeg 收到 EOF 才会刷出文件尾。
         drop(self.stdin);
-        let seconds = started.elapsed().as_secs_f64();
+        let seconds = real_seconds;
         let status = self.child.wait().map_err(|e| format!("等待 FFmpeg 结束失败：{e}"))?;
         if !status.success() {
             return Err(format!("FFmpeg 编码失败（退出码 {status}），文件可能不完整"));
         }
         if frames == 0 {
             return Err("一帧都没录到：目标窗口或显示器可能不可见".to_string());
+        }
+        // 音画合流：麦克风是无限实时流，停录只能直接结束进程，再拿两段有限文件封装。
+        // 之前把 dshow 接进编码器，视频 stdin EOF 后 FFmpeg 仍在等音频，`-shortest`
+        // 也不生效——实测停录后进程不退出，界面会卡死。
+        if let Some((mut audio_child, audio_stdin, wav)) = self.audio_child.take() {
+            drop(audio_stdin);
+            let _ = audio_child.kill();
+            let _ = audio_child.wait();
+            let wav_ready = std::fs::metadata(&wav).map(|meta| meta.len() > 2048).unwrap_or(false);
+            if wav_ready {
+                // 自动校齐起点：WAV 是 48k 单声道 16 位，按字节数就能算它录了多久。
+                // 设备打开和落盘缓冲会让音频比画面早开始，多出来的那段按 -ss 裁掉，
+                // 再用 -shortest 把尾部对齐到画面，两头都关上。
+                let wav_bytes = std::fs::metadata(&wav).map(|meta| meta.len()).unwrap_or(0);
+                let audio_secs = (wav_bytes.saturating_sub(44)) as f64 / 96_000.0;
+                let video_secs = frames as f64 / target_fps.max(1) as f64;
+                let audio_lead = (audio_secs - video_secs).clamp(0.0, 3.0);
+                let tmp = format!("{path}.mux.mp4");
+                let mut mux = Command::new(&self.ffmpeg);
+                mux.args(["-hide_banner", "-loglevel", "error", "-y", "-i", &path]);
+                if audio_lead > 0.05 {
+                    mux.args(["-ss", &format!("{audio_lead:.3}")]);
+                }
+                let status = mux
+                    .args([
+                        "-i",
+                        &wav,
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0",
+                        "-c:v",
+                        "copy",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "128k",
+                        "-shortest",
+                        "-movflags",
+                        "+faststart",
+                        &tmp,
+                    ])
+                    .status();
+                match status {
+                    Ok(status) if status.success() => {
+                        let _ = std::fs::remove_file(&path);
+                        let _ = std::fs::rename(&tmp, &path);
+                    }
+                    _ => {
+                        let _ = std::fs::remove_file(&tmp);
+                    }
+                }
+            }
+            let _ = std::fs::remove_file(&wav);
         }
         // 真实帧率要把「补齐用的重复帧」剔掉，否则会虚高。
         let real_frames = frames.saturating_sub(self.repeats);

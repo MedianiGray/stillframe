@@ -179,7 +179,7 @@
 **v0.3 录制第一批：桌面原生 30 帧管线（2026-11-27）**
 
 - 交付物：`desktop/src/recorder.rs`（FFmpeg 编码器 + `crop_rgba`）、`start_recording` / `stop_recording` 两条命令、前端桌面分支（`nativeStartRecording` / `nativeStopRecording`，`RecordPanel` 原生走 30 帧并显示 `秒 · fps · 帧数`）、README / CHANGELOG / ARCHITECTURE 同步。
-- 设计取舍：先抓一帧量尺寸并当首帧，首帧到了才开编码；选区宽高偶数化；掉帧不补、只如实计数；显式 `-an`，音频下一批。
+- 设计取舍：先抓一帧量尺寸并当首帧，首帧到了才开编码；选区宽高偶数化；掉帧不补、只如实计数；无音频时显式 `-an`（音频于第四批接通，做法见 §5.2 实施修订）。
 - 已验（Linux）：90 帧合成画面 → `ffprobe` 核对 h264 / 320×240 / `nb_frames=90` / `duration=3.000000`，裁剪长度与预期一致。
 - 未验：Windows 真机 1080p×60 秒帧率（目标 ≥28fps、丢帧 <2%）——需要在 Windows 上编译并跑真机，当前 GUI 会话桌面全黑的限制不影响录制（录制由 `xcap` + FFmpeg 走，不经 GUI 截图路径），下一轮补。
 - 未做：WASAPI 环回与麦克风混音、录屏标注进成片、FFmpeg sidecar 随包分发（现依赖 PATH 或显式传路径）。
@@ -255,7 +255,13 @@
 
 > **实施修订（2026-11-27 录制第二批实际做法）**：抓帧不再用 xcap——`capture_image()` 真机 3.9fps，封装开销占大头。改为 `FrameGrabber`：优先 DXGI Desktop Duplication（6–9ms/帧），回退 BitBlt（25fps 量级）；编码先探测 `h264_qsv` 用核显，回退 libx264 ultrafast；不做「三帧环形缓冲」，改为按节拍直写管道 + 落后时重复帧补齐 + 收尾 `pad_to`，保证成片时长等于录制时长。实测见 §4.2「录制第二批」表。
 >
-> **音频现状（实测摸底，下一批动手）**：本机 `ffmpeg -f dshow -list_devices` 只暴露「麦克风阵列 (Synaptics SmartAudio HD)」，**没有「立体声混音 / Stereo Mix」端点**，所以系统声不能靠 dshow 直接采。分两步走：① 麦克风走 ffmpeg 第二个 dshow 输入（`-f dshow -i audio="…" -c:a aac`，改动小、先让"有声音"成立）；② 系统声用 Rust 侧 WASAPI loopback 采集（`IAudioClient` 环回 + `IAudioCaptureClient`，48kHz 立体声 f32），先落临时 WAV，停止后用 `-c:v copy -c:a aac -shortest` 封装进 MP4——比在录制中开第二条管道稳。注意远程会话下 loopback 可能采到静音，验收要在物理会话或本地播放状态下的机器上做。
+> **音频落地（2026-11-27 录制第三批）**：麦克风已接通。做法比原方案再退一步——**音频不接进编码器，单独起一个 FFmpeg 进程录 48kHz 单声道 WAV**，停录时发 `q` 让它正常收尾，再用两段有限文件封装（`-c:v copy -c:a aac`）。原因是把 dshow 当编码器的第二输入时，它是无限实时流：视频 stdin 已 EOF，FFmpeg 仍在等音频，`-shortest` 也不生效，实测停录后进程不退出，界面会卡死。
+>
+> 起点对齐用自动校准：WAV 是 48kHz/16 位，按字节数就能算出它录了多久，比画面多出来的那段用 `-ss` 裁掉，尾部再 `-shortest` 追齐，两头都关上。实测 1080p/30 秒带麦克风成片 29.933 秒、音频 29.999 秒，音画差 66ms；15 秒样本差 32ms。
+>
+> 顺带修掉三个时长问题：① 统计秒数原先在补帧和等 FFmpeg 之后才取，20 秒录成 43 秒——改为录制线程停下即 `mark_end()` 钉住；② 补帧用「节拍累加器」会补超前，15 秒录出 466 帧——改为「已跑秒数 × 帧率」绝对对账；③ `sleep(3ms)` 在 Windows 上常常只睡 1–2ms，每帧欠一点、帧率偏高——改为剩 2ms 以内忙等到点。修完无麦克风 60 秒回到 1800 帧 / duration 60.000000。
+>
+> **系统声仍未接**：本机 `ffmpeg -f dshow` 只暴露麦克风阵列，没有立体声混音端点，得走 WASAPI 环回（`IAudioClient` loopback + `IAudioCaptureClient`，48kHz f32 落 WAV 再封装），放在下一批。注意远程会话下 loopback 可能采到静音，验收要在物理会话或本地播放状态下做。
 
 
 验收：1080p 连续 60 秒，实测帧率不低于 28，成片在系统播放器中正常播放，音画偏差小于 100 毫秒。

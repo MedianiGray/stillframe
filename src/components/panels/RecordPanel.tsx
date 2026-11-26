@@ -261,6 +261,7 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
         const path = await nativeStartRecording(
           { x: Math.round(rect.x), y: Math.round(rect.y), width: w, height: h },
           30,
+          voiceOn,
         );
         if (!path) throw new Error('桌面壳没有返回录制路径');
         session.stop(); // 停掉预览轮询，把 CPU 让给录制线程
@@ -268,7 +269,7 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
         setNativeDone(null);
         setNativeRecording(true);
         setRecording(true);
-        toast('开始录制（原生 30 帧，本轮先只录画面）', 'ok');
+        toast(voiceOn ? '开始录制（原生 30 帧，已采麦克风）' : '开始录制（原生 30 帧，无声）', 'ok');
       } catch (error) {
         toast(error instanceof Error ? error.message : '无法开始原生录制', 'warn');
       }
@@ -496,7 +497,7 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
 
             <button
               type="button"
-              title={nativeCapable ? '原生录制本轮先只录画面，声音下一批补' : soundOn ? QQ_TEXT.soundOff : QQ_TEXT.soundOn}
+              title={nativeCapable ? '系统声音要等 WASAPI 环回那一批，原生录制暂只支持麦克风' : soundOn ? QQ_TEXT.soundOff : QQ_TEXT.soundOn}
               disabled={nativeRecording}
               className={`${BTN} ${soundOn ? BTN_ON : ''} disabled:opacity-35`}
               onClick={() => {
@@ -512,10 +513,16 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
             </button>
             <button
               type="button"
-              title={nativeCapable ? '原生录制本轮先只录画面，声音下一批补' : voiceOn ? QQ_TEXT.voiceOff : QQ_TEXT.voiceOn}
+              title={voiceOn ? QQ_TEXT.voiceOff : QQ_TEXT.voiceOn}
               disabled={nativeRecording}
               className={`${BTN} ${voiceOn ? BTN_ON : ''} disabled:opacity-35`}
               onClick={async () => {
+                // 桌面壳里真正采声的是 Rust 的 dshow，不经 WebView，所以别在这一步
+                // 卡 getUserMedia 授权；设备不可用那边会静默退回无声，结果条看得出来。
+                if (nativeCapable) {
+                  setVoiceOn(!voiceOn);
+                  return;
+                }
                 if (voiceOn) {
                   micRef.current?.getTracks().forEach((track) => track.stop());
                   micRef.current = null;

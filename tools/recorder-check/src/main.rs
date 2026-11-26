@@ -55,6 +55,7 @@ fn main() {
         pix_fmt: "rgba",
         preset: "veryfast",
         codec: "libx264",
+        audio: None,
     })
     .expect("编码器启动失败");
     for i in 0..frames {
