@@ -61,6 +61,19 @@ systemAudio / mic ──► AudioContext 混音 ──► audio track
 
 停止后返回 Blob，与截图走同一套保存/图库链路。
 
+桌面壳不走上面这条，改成原生管线（`desktop/src/lib.rs` + `recorder.rs` + `win_capture.rs`）：
+
+```
+FrameGrabber::grab() ──► Encoder::push_frame() ──► ffmpeg stdin (rawvideo)
+      │                        │                        │
+ DXGI Dup.  ─失败回退→ BitBlt    h264_qsv ─不可用→ libx264   └─► MP4 (+faststart)
+```
+
+- `FrameGrabber` 先试 DXGI Desktop Duplication（`CopyResource` 到 staging 纹理 → `Map` 读回），拿不到就退 `BitBlt` + `CreateDIBSection`（DIB 内存即帧缓冲，零拷贝）。两条路径对外都是「选区 BGRA」。
+- `pick_encoder` 先真编 5 帧探测 `h264_qsv`，能用就交给核显，`write_avg_ms` 落到 1–3ms；否则 libx264 `ultrafast`。
+- 节奏由 `pace_frame` 保证：落后目标节拍就重复当前帧补齐时间轴，收尾 `pad_to` 按真实秒数补足，成片时长因此与录制时长一致；录制期 `timeBeginPeriod(1)` 提高 sleep 精度。
+- 统计口径：`fps` 是内容更新率（重复帧不计），`frames` 是成片总帧数，`backend` 记实际路径（如 `dxgi+h264_qsv`）。
+
 ## 索引与存储
 
 - 设置：`localStorage`，键 `stillframe.settings.v1`，写入时广播事件让已挂载的组件同步。
@@ -81,8 +94,8 @@ systemAudio / mic ──► AudioContext 混音 ──► audio track
 | `save_png` | `dataUrl`, `suggestedName` | 保存路径 | 系统保存对话框 |
 | `write_shot` | `dataUrl`, `suggestedName` | 落盘路径 | 静默写入 `图片/Stillframe`，供自动保存 |
 | `scroll_at` | `x`, `y`, `notches` | — | 向目标窗口注入竖向滚轮，光标用完即复位（自动滚动长截图用） |
-| `start_recording` | `rect?`, `fps?`, `ffmpeg?` | 即将写入的 MP4 路径 | 起抓帧线程 + FFmpeg sidecar；`rect` 为全屏冻结图坐标，缺省录整屏 |
-| `stop_recording` | — | `{path,frames,seconds,fps,dropped}` | 停录、等 FFmpeg 收尾，回传实绩（不补帧，只如实计数） |
+| `start_recording` | `rect?`, `fps?`, `ffmpeg?` | 即将写入的 MP4 路径 | 起抓帧线程 + FFmpeg；`rect` 为全屏冻结图坐标，缺省录整屏 |
+| `stop_recording` | — | `{path,frames,seconds,fps,dropped,writeAvgMs,grabAvgMs,repeats,backend}` | 停录、等 FFmpeg 收尾，回传实绩（`fps` 为内容更新率，重复帧不计） |
 | `list_windows` | — | `[{title, id}]` | 窗口列表（选区吸附/指定窗口截图） |
 
 保存策略（`src/lib/save.ts`）：桌面端手动保存走 `save_png`、自动保存走 `write_shot`；Android 两端都走 `Bridge.savePng`（相册，无弹窗）；网页端优先写已授权目录，未授权时手动保存退回下载、自动保存直接放弃。

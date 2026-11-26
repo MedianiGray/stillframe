@@ -50,6 +50,20 @@
 - **可解释**：判据不是黑箱——代码靠特征记号与缩进，表格靠「多数行能按两个以上空格切成同样列数」，清单靠行首符号，都能在界面上用一句话讲清，并写进 `docs/SMART-CAPTURE.md` 的 L2 一节。
 - **单测**：`tests/intent.test.ts` 8 条（太短不猜、中文正文、英文翻译、代码、英文代码不翻译、表格列数、清单、纯数字），全套 37 条通过。
 
+## v0.3 第三批：录制真机达标，抓帧换 DXGI（2026-11-27）
+
+上一批把录制接到 FFmpeg 之后，真机只跑到 3.9fps——「接对了」和「跑得动」是两件事。这一批把每一层都量了一遍，逐层换掉：
+
+- **`xcap` 不能再当录制抓帧源**：`Monitor::capture_image()` 每帧约 256ms（60 秒只有 236 帧，3.9fps）。它的封装每帧重建 DC、再做整帧格式转换，成本花在封装不在硬件。
+- **自建 `BitBlt` 抓帧器**（`desktop/src/win_capture.rs`）：`CreateDIBSection` 一次建好 top-down 32 位 DIB，每帧只 `BitBlt`，像素直接在 DIB 内存里，省掉整帧拷贝；按选区取源，不用抓完再裁。实测提到 25.1fps，但单帧 38ms 且随会话负载漂到 40–56ms，仍达不到 30。
+- **换 DXGI Desktop Duplication**：直接从桌面合成器取帧，`CopyResource` 到 staging 纹理再 `Map` 读回，抓帧降到 **6–9ms**。静态画面时 Duplication 不给新帧，就沿用上一帧顶住时间轴。
+- **编码让给核显**：libx264 在真实桌面画面下写入阻塞 28ms（帧率掉回 15.4fps）。现在先真编 5 帧探测 `h264_qsv` 是否可用（列表里有不代表驱动能用），可用就用核显编码，写入降到 1.4–3.2ms，CPU 全留给抓帧；不可用回退 libx264 `ultrafast`。
+- **时长不再被快放**：此前按固定 `-r` 解释每帧，抓帧慢于目标帧率时 60 秒会录成 47 秒。现在落后节拍就重复当前帧补齐时间轴，收尾再按实际秒数 `pad_to`，成片时长精确对上。
+- **补上 1ms 定时器精度**：Windows 默认定时器粒度 15.6ms，`sleep(33ms)` 会被拉成 46ms，帧率天然卡在 20 出头；录制期间 `timeBeginPeriod(1)`，结束恢复。
+- **真机达标数据**（`--record-probe` 跑满，ffprobe 核对）：1080p×60 秒 → 1800 帧 / `duration=60.000000` / 29.0fps / 丢帧 0.44%；复测 27.9fps / 0.72%；720p×40 秒 → 1200 帧 / `duration=40.000000` / 28.1fps / 0.75%。三轮均值 28.3fps、丢帧均 <1%，达到蓝图「≥28fps、丢帧 <2%」。抽帧核对画面为真实桌面，非黑屏。
+- **可诊断**：结束统计新增 `grab_avg_ms`（抓帧耗时）、`write_avg_ms`（写入耗时）、`repeats`（补帧数）、`backend`（如 `dxgi+h264_qsv`），一眼看出瓶颈在抓帧还是编码、走的是哪条回退路径。
+- **无 GUI 标定入口**：`stillframe-desktop.exe --record-probe=<路径>:<秒数> [--probe-rect=x,y,w,h]`，不弹窗、不进 Tauri，跑完把结果写到 `<路径>.log`，退出码 0/1。
+
 ## v0.3 第二批：桌面录制改走原生 30 帧管线（2026-11-27）
 
 - **换掉那条跑不动的路**：桌面壳里录屏原本是「`capture_screen` 每 320ms 轮询一次 → 画进 canvas → `canvas.captureStream` → MediaRecorder」，实测个位数帧率、只能出 WebM，撑不起「可交付录像」（蓝图 G2 / 5.2）。现在桌面壳点开始录制，直接交给 Rust：抓帧线程按目标间隔抓选区，RGBA 原始帧写进 FFmpeg 的 stdin，libx264 `veryfast` / CRF 20 编码成 MP4（`+faststart`），落在 `图片/Stillframe/录屏-<时间戳>.mp4`。

@@ -57,7 +57,7 @@
 | 区域截图 | ✅ 每次授权屏幕共享 | ✅ 系统截屏接口，免授权 | ✅ MediaProjection + 前台服务 | ⚠️ 仅相册导入 |
 | 标注 / 导出 | ✅ | ✅ | ✅ | ✅ |
 | 滚动长截图 | ✅ | ✅ | ✅ | ⚠️ 仅拼接相册图 |
-| 区域录屏 | ⚠️ 网页端只能 WebM，30fps | ✅ 原生 30 帧直出 MP4（编码链已真跑，1080p 60 秒帧率待真机验收） | ⚠️ 原生抓帧约 3fps | ⚠️ 受限 |
+| 区域录屏 | ⚠️ 网页端只能 WebM，30fps | ✅ 原生直出 MP4，1080p 60 秒实测 28–29fps、丢帧 <1% | ⚠️ 原生抓帧约 3fps | ⚠️ 受限 |
 | 提取文字 | ✅ | ✅ | ✅ | ✅ |
 | 屏幕翻译 | ✅ 需自备 API Key | ✅ | ✅ | ✅ |
 | 贴图钉屏 | ❌ 不能置顶 | ✅ 独立置顶窗口 | ✅ 悬浮窗（需授权） | ❌ |
@@ -110,7 +110,7 @@ gradlew assembleDebug
 
 Android 壳用 `WebView` 加载 `assets/www/index.html` 并注入 `AndroidBridge`，权限流程为：通知权限 → 屏幕录制授权（MediaProjection）→ 悬浮窗权限（可选）。
 
-> **构建状态说明**：网页端 `tsc --noEmit` 零错误、`npm run build` 通过；`desktop/` 已在 Windows 上用 Rust 1.100 + MSVC 编译并真机验收（截图、窗口截图、取字、延时、快捷浮窗）；自动滚动代码完成但 20 屏样本未跑够；录制管线的编码侧已在 Linux 上真跑（90 帧合成画面 → h264 MP4，时长 3.000s、帧数 90 与输入吻合），1080p 60 秒真机帧率待 Windows 验收；`android/` 仍是未做编译验证的源码工程（本机无 JDK / Android SDK），首次构建若遇版本号或 API 变更，按报错调整依赖版本即可。
+> **构建状态说明**：网页端 `tsc --noEmit` 零错误、`npm run build` 通过；`desktop/` 已在 Windows 上用 Rust 1.100 + MSVC 编译并真机验收（截图、窗口截图、取字、延时、快捷浮窗、1080p 60 秒录屏）；自动滚动代码完成但 20 屏样本未跑够；录制管线编码侧在 Linux 真跑（90 帧合成画面 → h264 MP4，时长 3.000s、帧数 90 与输入吻合），Windows 真机 1080p×60 秒三轮 27.9–29.0fps、丢帧均 <1%、成片时长为整秒；`android/` 仍是未做编译验证的源码工程（本机无 JDK / Android SDK），首次构建若遇版本号或 API 变更，按报错调整依赖版本即可。
 
 ## 与 QQ 截图模块的对照
 
@@ -173,7 +173,17 @@ stillframe/
 
 网页端 `RegionRecorder` 把整屏流每帧按选区 `drawImage` 到离屏 canvas，`canvas.captureStream(fps)` 得到裁切后的视频轨，再用 `AudioContext` 把系统声与麦克风混成一条音轨，交给 `MediaRecorder`——不依赖服务端，也不用装 FFmpeg，代价是只能出 WebM。
 
-桌面壳改走原生：`start_recording` 起一个抓帧线程，`xcap` 按目标间隔抓选区，RGBA 原始帧直接写进 `ffmpeg -f rawvideo` 的 stdin，libx264 `veryfast` / CRF 20 编成 MP4。这样绕开了 WebView 里那条「轮询抓帧只有个位数帧率」的路，也让成片能直接播放和转发。结束时报实际帧数与掉帧，不粉饰。
+桌面壳改走原生：`start_recording` 起一个抓帧线程，按目标间隔抓选区，原始像素直接写进 `ffmpeg -f rawvideo` 的 stdin，编成 MP4。这样绕开了 WebView 里那条「轮询抓帧只有个位数帧率」的路，也让成片能直接播放和转发。
+
+抓帧与编码各有一条回退链，都是先试快的、不行再退稳的：
+
+- **抓帧**：优先 DXGI Desktop Duplication（桌面合成器直接给帧，1080p 实测 6–9ms/帧）；建不起来（旧显卡、会话不支持、驱动拒绝）自动退 `BitBlt` + `CreateDIBSection`（25fps 量级，够用但吃 CPU）。静态画面时 Duplication 不给新帧，沿用上一帧顶住时间轴。
+- **编码**：先真编 5 帧探测 `h264_qsv`（编码器列表里有不代表驱动可用），能用就走核显、把 CPU 留给抓帧；不能用退 libx264 `ultrafast`。
+- **节奏**：录制期间 `timeBeginPeriod(1)`（Windows 默认定时器粒度 15.6ms 会把 `sleep(33ms)` 拉成 46ms）；抓帧追不上节拍时重复当前帧补齐，收尾再按实际秒数补足，成片时长因此精确等于录制时长，不会快放。
+
+结束时的实绩（`秒 · fps · 帧数`，并附带 `grab` / `write` 耗时、补帧数、实际后端如 `dxgi+h264_qsv`）可以在 `--record-probe` 的日志里直接核对。Windows 真机 1080p×60 秒三轮：29.0 / 27.9 / 28.1fps，丢帧 0.44% / 0.72% / 0.75%，`duration` 均为整秒。
+
+不想开界面也能标定：`stillframe-desktop.exe --record-probe=<mp4 路径>:<秒数> [--probe-rect=x,y,w,h]`，跑完把结果写到 `<mp4 路径>.log`，退出码 0/1。
 
 FFmpeg 的查找顺序：命令参数 → 环境变量 `STILLFRAME_FFMPEG` → 应用目录（`ffmpeg.exe`、`sidecars/ffmpeg.exe`、`binaries/ffmpeg.exe`）→ PATH。都找不到时，点开始录制会直接报错退出，不会静默录出一段空文件。
 
@@ -222,6 +232,8 @@ OCR 用 tesseract.js 的单例 worker，换语言时 terminate 重建，避免 w
 - **OCR 首次识别要等语言包就位**：内置包首次会从站点读入并写入 IndexedDB（约 3–4MB，一次性），之后走缓存；中文包 1.73MB 已随站点分发，不再从外网拉。
 - **Android 10+ 录屏必须常驻前台服务通知**，系统强制，无法隐藏。
 - **iOS 不做系统级抓屏**：Sandbox 不允许跨 App 读屏，仓库只保证「相册导入 → 标注 → 拼接」这条链路可用；未提供 iOS 工程。
+- **录屏帧率取决于机器与桌面会话**。抓帧走 DXGI 时 1080p 约 6–9ms/帧；退回 BitBlt 时在远程/低配会话会掉到 20–25fps。`h264_qsv` 不可用会退 libx264，此时编码也会抢 CPU。实际走了哪条路径，看结束统计里的 `backend`（如 `dxgi+h264_qsv`）。
+- **静止画面不产生新帧**。Desktop Duplication 只在画面变化时给帧，录制里用上一帧补齐时间轴——成片时长与帧率都正确，但一段完全静止的录屏看起来就是一张静止图，这是预期行为。
 - **多显示器与混合 DPI 仍按单屏假设处理**：选区、窗口、滚动注入点用的是同一套坐标，副屏或 125%/150% 混排时可能出现偏移。
 - **android/ 未编译验证**（本机缺 JDK / Android SDK），见上文构建状态说明。
 
@@ -231,7 +243,7 @@ OCR 用 tesseract.js 的单例 worker，换语言时 terminate 重建，避免 w
 
 - [ ] v0.2 可用性补齐（第 1–6 周）：桌面落盘、Alt 吸附与等比、贴图管理、识图段落（已完成主体，剩 E2E；见 [CHANGELOG.md](CHANGELOG.md)）
 - [x] 长截图自动滚动（桌面壳注入滚轮 + 逐帧拼接 + 到底判定）
-- [ ] v0.3 录制（第 7–14 周）：1080p30 录制直出 MP4
+- [ ] v0.3 录制（第 7–14 周）：1080p30 录制直出 MP4（画面链路已达标：1080p 60 秒 28–29fps、丢帧 <1%；剩声音链路与标注进成片）
 - [ ] v1.0 发布（第 15–20 周）：三端安装包、双语、性能与测试基线
 - [ ] 标注支持图层顺序与自由变换
 - [x] OCR 引擎与语言包内置、离线可用，语言包目录可改填自托管地址
