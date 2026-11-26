@@ -69,7 +69,7 @@ async fn pin_image(app: AppHandle, data_url: String) -> Result<(), String> {
     let payload = serde_json::to_string(&data_url).map_err(err)?;
     let window = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("pin.html".into()))
         .title("Stillframe Pin")
-        .inner_size(360.0, 240.0)
+        .inner_size(600.0, 500.0)
         .min_inner_size(80.0, 60.0)
         .decorations(false)
         .transparent(true)

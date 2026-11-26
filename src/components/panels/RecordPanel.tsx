@@ -1,12 +1,40 @@
 import { useEffect, useRef, useState } from 'react';
-import { Download, Pause, Play, Save, Square, Video } from 'lucide-react';
+import {
+  ArrowUpRight,
+  Brush,
+  Circle,
+  Eraser,
+  Mic,
+  MicOff,
+  Play,
+  Save,
+  Square,
+  Type,
+  Undo2,
+  Video,
+  Volume2,
+  VolumeX,
+  X,
+  Zap,
+} from 'lucide-react';
 import type { Rect } from '../../lib/types';
 import type { ScreenSession } from '../../lib/capture';
 import { RegionRecorder } from '../../lib/recorder';
 import { downloadBlob, timestampName } from '../../lib/image';
 import { putShot } from '../../lib/storage';
 import { writeToDirectory } from '../../lib/autosave';
+import { QQ_TEXT } from '../../lib/qqspec';
 import { useToast } from '../Toasts';
+
+type Pt = { x: number; y: number };
+
+type RecAnn =
+  | { id: string; kind: 'pen'; color: string; width: number; points: Pt[] }
+  | { id: string; kind: 'rect' | 'ellipse'; color: string; width: number; a: Pt; b: Pt }
+  | { id: string; kind: 'arrow'; color: string; width: number; a: Pt; b: Pt }
+  | { id: string; kind: 'text'; color: string; size: number; pos: Pt; text: string };
+
+type RecTool = 'pen' | 'rect' | 'ellipse' | 'arrow' | 'text' | 'laser';
 
 interface RecordPanelProps {
   session: ScreenSession;
@@ -14,6 +42,10 @@ interface RecordPanelProps {
   onClose: () => void;
   onSaved: () => void;
 }
+
+const BTN =
+  'flex h-[30px] w-[30px] items-center justify-center rounded-[2px] text-[#D6DBE0] transition-colors hover:bg-white/10 disabled:opacity-35';
+const BTN_ON = 'bg-[#12B7F5]/22 text-[#5FD3FF] ring-1 ring-[#12B7F5]/60';
 
 function formatClock(total: number): string {
   const m = Math.floor(total / 60);
@@ -24,11 +56,26 @@ function formatClock(total: number): string {
 export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProps) {
   const toast = useToast();
   const recorderRef = useRef<RegionRecorder | null>(null);
+  const previewRef = useRef<HTMLCanvasElement | null>(null);
+  const rafRef = useRef(0);
+  const micRef = useRef<MediaStream | null>(null);
+  const dragRef = useRef<{ a: Pt; kind: RecTool } | null>(null);
+
   const [recording, setRecording] = useState(false);
-  const [paused, setPaused] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [blob, setBlob] = useState<Blob | null>(null);
   const [url, setUrl] = useState<string | null>(null);
+  const [tool, setTool] = useState<RecTool>('pen');
+  const [color, setColor] = useState('#FB3838');
+  const [anns, setAnns] = useState<RecAnn[]>([]);
+  const [draft, setDraft] = useState<RecAnn | null>(null);
+  const [laser, setLaser] = useState<{ x: number; y: number; t: number }[]>([]);
+  const [textDraft, setTextDraft] = useState<{ pos: Pt; sx: number; sy: number; value: string } | null>(null);
+  const [soundOn, setSoundOn] = useState(session.audioTracks.length > 0);
+  const [voiceOn, setVoiceOn] = useState(false);
+
+  const w = Math.max(2, Math.round(rect.w));
+  const h = Math.max(2, Math.round(rect.h));
 
   useEffect(() => {
     return () => {
@@ -36,33 +83,164 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
     };
   }, [url]);
 
-  const begin = () => {
+  useEffect(() => {
+    return () => {
+      micRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  /** 录制叠加层：箭头、方框、文字、激光都会进成片。 */
+  const drawOverlay = (ctx: CanvasRenderingContext2D, cw: number, ch: number) => {
+    const s = cw / w;
+    const all = draft ? [...anns, draft] : anns;
+    for (const item of all) {
+      ctx.save();
+      if (item.kind === 'pen') {
+        ctx.strokeStyle = item.color;
+        ctx.lineWidth = Math.max(1, item.width * s);
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        item.points.forEach((p, i) => (i ? ctx.lineTo(p.x * s, p.y * s) : ctx.moveTo(p.x * s, p.y * s)));
+        ctx.stroke();
+      } else if (item.kind === 'rect' || item.kind === 'ellipse') {
+        const x = Math.min(item.a.x, item.b.x) * s;
+        const y = Math.min(item.a.y, item.b.y) * s;
+        const rw = Math.abs(item.b.x - item.a.x) * s;
+        const rh = Math.abs(item.b.y - item.a.y) * s;
+        ctx.strokeStyle = item.color;
+        ctx.lineWidth = Math.max(1, item.width * s);
+        if (item.kind === 'rect') ctx.strokeRect(x, y, rw, rh);
+        else {
+          ctx.beginPath();
+          ctx.ellipse(x + rw / 2, y + rh / 2, rw / 2, rh / 2, 0, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      } else if (item.kind === 'arrow') {
+        const ax = item.a.x * s;
+        const ay = item.a.y * s;
+        const bx = item.b.x * s;
+        const by = item.b.y * s;
+        const angle = Math.atan2(by - ay, bx - ax);
+        const head = Math.max(8, item.width * s * 3);
+        ctx.strokeStyle = item.color;
+        ctx.fillStyle = item.color;
+        ctx.lineWidth = Math.max(1, item.width * s);
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.lineTo(bx - head * Math.cos(angle - Math.PI / 7), by - head * Math.sin(angle - Math.PI / 7));
+        ctx.lineTo(bx - head * Math.cos(angle + Math.PI / 7), by - head * Math.sin(angle + Math.PI / 7));
+        ctx.closePath();
+        ctx.fill();
+      } else if (item.kind === 'text') {
+        ctx.fillStyle = item.color;
+        ctx.font = `600 ${item.size * s}px "Microsoft YaHei UI", sans-serif`;
+        ctx.textBaseline = 'top';
+        ctx.fillText(item.text, item.pos.x * s, item.pos.y * s);
+      }
+      ctx.restore();
+    }
+
+    const now = performance.now();
+    for (const dot of laser) {
+      const age = now - dot.t;
+      if (age > 620) continue;
+      const alpha = 1 - age / 620;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#FF4D4F';
+      ctx.beginPath();
+      ctx.arc(dot.x * s, dot.y * s, 6 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = alpha * 0.35;
+      ctx.beginPath();
+      ctx.arc(dot.x * s, dot.y * s, 12 * s, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  };
+
+  // 预览循环：一直显示选区实时画面 + 标注
+  useEffect(() => {
+    const canvas = previewRef.current;
+    if (!canvas) return;
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const loop = () => {
+      try {
+        ctx.drawImage(session.video, Math.round(rect.x), Math.round(rect.y), w, h, 0, 0, w, h);
+        drawOverlay(ctx, w, h);
+      } catch {
+        // 首帧未就绪
+      }
+      rafRef.current = window.requestAnimationFrame(loop);
+    };
+    loop();
+    return () => window.cancelAnimationFrame(rafRef.current);
+  });
+
+  // 激光轨迹自动清理
+  useEffect(() => {
+    if (!laser.length) return;
+    const timer = window.setTimeout(() => setLaser((prev) => prev.filter((d) => performance.now() - d.t < 620)), 320);
+    return () => window.clearTimeout(timer);
+  }, [laser]);
+
+  const ensureMic = async (): Promise<MediaStream | null> => {
+    if (micRef.current) return micRef.current;
     try {
-      const audio = session.audioTracks.length
-        ? new MediaStream(session.audioTracks)
-        : null;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micRef.current = stream;
+      return stream;
+    } catch {
+      toast('麦克风没有授权，无法开启麦克风', 'warn');
+      return null;
+    }
+  };
+
+  const buildAudio = async (): Promise<MediaStream | null> => {
+    const system = soundOn && session.audioTracks.length ? new MediaStream(session.audioTracks) : null;
+    const mic = voiceOn ? await ensureMic() : null;
+    if (system && mic) {
+      const AudioCtx =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (AudioCtx) {
+        const ctx = new AudioCtx();
+        const dest = ctx.createMediaStreamDestination();
+        [system, mic].forEach((stream) => {
+          stream.getAudioTracks().forEach((track) => {
+            ctx.createMediaStreamSource(new MediaStream([track])).connect(dest);
+          });
+        });
+        return dest.stream;
+      }
+    }
+    return system ?? mic;
+  };
+
+  const begin = async () => {
+    try {
+      const audio = await buildAudio();
       const recorder = new RegionRecorder(session.video, {
         rect,
         fps: 30,
         audioStream: audio,
         onTick: setSeconds,
       });
+      recorder.setOverlay(drawOverlay);
       recorder.start();
       recorderRef.current = recorder;
       setRecording(true);
-      setPaused(false);
       toast(audio ? '开始录制，已收录声音' : '开始录制（无声）', 'ok');
     } catch (error) {
       toast(error instanceof Error ? error.message : '无法开始录制', 'warn');
     }
-  };
-
-  const togglePause = () => {
-    const recorder = recorderRef.current;
-    if (!recorder) return;
-    if (paused) recorder.resume();
-    else recorder.pause();
-    setPaused((v) => !v);
   };
 
   const stop = async () => {
@@ -87,8 +265,8 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
       id: `vid_${Date.now()}`,
       kind: 'video',
       createdAt: Date.now(),
-      width: Math.round(rect.w),
-      height: Math.round(rect.h),
+      width: w,
+      height: h,
       bytes: blob.size,
       blob,
     });
@@ -98,86 +276,234 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
     toast('已存入图库', 'ok');
   };
 
+  const toPoint = (event: React.PointerEvent<HTMLCanvasElement>): Pt => {
+    const canvas = event.currentTarget;
+    const box = canvas.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(w, ((event.clientX - box.left) / box.width) * w)),
+      y: Math.max(0, Math.min(h, ((event.clientY - box.top) / box.height) * h)),
+    };
+  };
+
+  const onDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const p = toPoint(event);
+    if (tool === 'laser') {
+      setLaser((prev) => [...prev.slice(-40), { x: p.x, y: p.y, t: performance.now() }]);
+      return;
+    }
+    if (tool === 'text') {
+      setTextDraft({ pos: p, sx: event.clientX, sy: event.clientY, value: '' });
+      return;
+    }
+    dragRef.current = { a: p, kind: tool };
+    if (tool === 'pen') {
+      setDraft({ id: 'd', kind: 'pen', color, width: 3, points: [p] });
+    }
+  };
+
+  const onMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const p = toPoint(event);
+    if (tool === 'laser' && event.buttons === 1) {
+      setLaser((prev) => [...prev.slice(-40), { x: p.x, y: p.y, t: performance.now() }]);
+      return;
+    }
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (drag.kind === 'pen') {
+      setDraft((prev) =>
+        prev && prev.kind === 'pen'
+          ? { ...prev, points: [...prev.points, p] }
+          : { id: 'd', kind: 'pen', color, width: 3, points: [drag.a, p] },
+      );
+    } else if (drag.kind === 'rect' || drag.kind === 'ellipse') {
+      setDraft({ id: 'd', kind: drag.kind, color, width: 3, a: drag.a, b: p });
+    } else if (drag.kind === 'arrow') {
+      setDraft({ id: 'd', kind: 'arrow', color, width: 3, a: drag.a, b: p });
+    }
+  };
+
+  const onUp = () => {
+    const current = draft;
+    dragRef.current = null;
+    setDraft(null);
+    if (!current) return;
+    if ('points' in current && current.points.length < 2) return;
+    if ('b' in current && Math.hypot(current.b.x - current.a.x, current.b.y - current.a.y) < 4) return;
+    setAnns((prev) => [...prev, { ...current, id: `r${prev.length + 1}` } as RecAnn]);
+  };
+
   return (
-    <div className="flex min-h-0 flex-1">
-      <div className="stage-grid relative flex min-w-0 flex-1 items-center justify-center p-6">
+    <div className="relative flex min-h-0 flex-1 flex-col bg-ink-950">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center p-6 pb-20">
         {url ? (
           <video src={url} controls className="max-h-full max-w-full shadow-stage" />
         ) : (
-          <div className="relative flex h-[220px] w-[360px] items-center justify-center border border-ink-600 bg-ink-850">
-            <span className="frame-corner left-2 top-2 border-l-2 border-t-2" />
-            <span className="frame-corner bottom-2 right-2 border-b-2 border-r-2" />
-            <div className="flex flex-col items-center gap-3">
-              <Video size={26} className={recording ? 'text-signal-rec' : 'text-muted'} />
-              <span className="font-mono text-[22px] tabular tracking-widest text-paper">
-                {formatClock(seconds)}
-              </span>
-              <span className="font-mono text-[10px] tracking-wider text-muted">
-                {Math.round(rect.w)} × {Math.round(rect.h)} · 30 FPS
-              </span>
-            </div>
+          <div className="relative max-h-full max-w-full">
+            <canvas
+              ref={previewRef}
+              className="max-h-full max-w-full touch-none shadow-stage ring-1 ring-white/10"
+              style={{ aspectRatio: `${w} / ${h}` }}
+              onPointerDown={onDown}
+              onPointerMove={onMove}
+              onPointerUp={onUp}
+              onPointerCancel={onUp}
+            />
+            {textDraft ? (
+              <input
+                autoFocus
+                value={textDraft.value}
+                className="absolute z-20 w-[220px] border border-[#12B7F5] bg-ink-900 px-2 py-1 text-[12px] text-paper outline-none"
+                style={{ left: Math.min(textDraft.sx, window.innerWidth - 260), top: textDraft.sy }}
+                onChange={(e) => setTextDraft({ ...textDraft, value: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') setTextDraft(null);
+                  if (e.key === 'Enter' && textDraft.value.trim()) {
+                    setAnns((prev) => [
+                      ...prev,
+                      { id: `t${prev.length + 1}`, kind: 'text', color, size: 18, pos: textDraft.pos, text: textDraft.value.trim() },
+                    ]);
+                    setTextDraft(null);
+                  }
+                }}
+                onBlur={() => setTextDraft(null)}
+              />
+            ) : null}
           </div>
         )}
+
         {recording ? (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 border border-signal-rec/60 bg-ink-900/90 px-3 py-1 font-mono text-[11px] text-signal-rec">
-            {paused ? 'PAUSED' : 'REC'} · {formatClock(seconds)}
+          <div className="absolute left-4 top-3 flex items-center gap-2 rounded-[2px] bg-black/60 px-2 py-1 font-mono text-[11px] text-[#FF5A5F]">
+            <span className="h-2 w-2 rounded-full bg-[#FF5A5F]" /> REC · {formatClock(seconds)}
+          </div>
+        ) : null}
+        {!recording && !url ? (
+          <div className="pointer-events-none absolute left-4 top-3 flex items-center gap-2 font-mono text-[10px] tracking-wider text-muted/70">
+            <span className="border border-white/10 bg-black/40 px-1.5 py-0.5 text-paper/70">{QQ_TEXT.record}</span>
+            <span>
+              {w} × {h}
+            </span>
           </div>
         ) : null}
       </div>
 
-      <aside className="flex w-[320px] shrink-0 flex-col overflow-y-auto border-l border-ink-600/50 bg-ink-900">
-        <div className="border-b border-ink-600/50 p-4">
-          <span className="label">录制</span>
-          <div className="mt-3 grid grid-cols-2 gap-1.5">
+      {/* QQ 录屏工具栏：画笔 / 矩形 / 椭圆 / 箭头 / 文字 / 激光 | 撤销 / 清除 | 声音 / 麦克风 | 退出 / 开始-结束 */}
+      {!url ? (
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2">
+          <div className="flex items-center gap-0.5 rounded-[3px] bg-[#1F2226]/95 px-1.5 py-1 shadow-[0_6px_22px_rgba(0,0,0,0.45)] ring-1 ring-white/10">
+            {(
+              [
+                ['pen', Brush, '画刷工具'],
+                ['rect', Square, '矩形工具'],
+                ['ellipse', Circle, '椭圆工具'],
+                ['arrow', ArrowUpRight, '箭头工具'],
+                ['text', Type, '文字工具'],
+                ['laser', Zap, '激光工具'],
+              ] as const
+            ).map(([id, Icon, tip]) => (
+              <button
+                key={id}
+                type="button"
+                title={tip}
+                aria-pressed={tool === id}
+                className={`${BTN} ${tool === id ? BTN_ON : ''}`}
+                onClick={() => setTool(id)}
+              >
+                <Icon size={16} strokeWidth={1.7} />
+              </button>
+            ))}
+
+            <span className="mx-1 h-[16px] w-px bg-white/15" />
+
+            <button type="button" title="撤销" className={BTN} disabled={!anns.length} onClick={() => setAnns((prev) => prev.slice(0, -1))}>
+              <Undo2 size={16} strokeWidth={1.7} />
+            </button>
+            <button type="button" title={QQ_TEXT.clear} className={BTN} disabled={!anns.length} onClick={() => setAnns([])}>
+              <Eraser size={16} strokeWidth={1.7} />
+            </button>
+
+            <span className="mx-1 h-[16px] w-px bg-white/15" />
+
+            <button
+              type="button"
+              title={soundOn ? QQ_TEXT.soundOff : QQ_TEXT.soundOn}
+              className={`${BTN} ${soundOn ? BTN_ON : ''}`}
+              onClick={() => {
+                const next = !soundOn;
+                session.audioTracks.forEach((track) => {
+                  track.enabled = next;
+                });
+                setSoundOn(next);
+                if (!session.audioTracks.length) toast('本次共享没有系统声音，浏览器弹窗里要勾选音频', 'warn');
+              }}
+            >
+              {soundOn ? <Volume2 size={16} strokeWidth={1.7} /> : <VolumeX size={16} strokeWidth={1.7} />}
+            </button>
+            <button
+              type="button"
+              title={voiceOn ? QQ_TEXT.voiceOff : QQ_TEXT.voiceOn}
+              className={`${BTN} ${voiceOn ? BTN_ON : ''}`}
+              onClick={async () => {
+                if (voiceOn) {
+                  micRef.current?.getTracks().forEach((track) => track.stop());
+                  micRef.current = null;
+                  setVoiceOn(false);
+                  return;
+                }
+                const mic = await ensureMic();
+                if (mic) setVoiceOn(true);
+              }}
+            >
+              {voiceOn ? <Mic size={16} strokeWidth={1.7} /> : <MicOff size={16} strokeWidth={1.7} />}
+            </button>
+
+            <span className="mx-1 h-[16px] w-px bg-white/15" />
+
+            <button type="button" title={QQ_TEXT.exitTip} className={BTN} onClick={onClose}>
+              <X size={16} strokeWidth={1.8} />
+            </button>
             {!recording ? (
-              <button type="button" className="btn btn-accent col-span-2" onClick={begin} disabled={!!blob}>
-                <Play size={14} /> 开始录制
+              <button
+                type="button"
+                className="ml-0.5 flex h-[30px] items-center gap-1 rounded-[2px] bg-[#12B7F5] px-2.5 text-[12px] font-medium text-[#04212E] hover:bg-[#3AC5FA]"
+                onClick={() => void begin()}
+              >
+                <Play size={13} strokeWidth={2.2} />
+                {QQ_TEXT.recordStart}
               </button>
             ) : (
-              <>
-                <button type="button" className="btn" onClick={togglePause}>
-                  {paused ? <Play size={14} /> : <Pause size={14} />}
-                  {paused ? '继续' : '暂停'}
-                </button>
-                <button type="button" className="btn" onClick={stop}>
-                  <Square size={13} /> 停止
-                </button>
-              </>
+              <button
+                type="button"
+                className="ml-0.5 flex h-[30px] items-center gap-1 rounded-[2px] bg-[#FF5A5F] px-2.5 text-[12px] font-medium text-white hover:bg-[#FF7378]"
+                onClick={() => void stop()}
+              >
+                <Square size={12} strokeWidth={2.2} />
+                {QQ_TEXT.recordEnd}
+              </button>
             )}
           </div>
-          {session.audioTracks.length === 0 ? (
-            <p className="mt-2 text-[11px] leading-5 text-muted">
-              本次共享没有带上系统声音。要录声音，请在浏览器的共享弹窗里勾选「分享标签页音频 / 系统音频」。
-            </p>
-          ) : null}
         </div>
+      ) : null}
 
-        {blob ? (
-          <div className="p-4">
-            <span className="label">结果</span>
-            <p className="mt-2 font-mono text-[11px] text-muted">
-              {(blob.size / 1024 / 1024).toFixed(2)} MB · {formatClock(seconds)}
-            </p>
-            <div className="mt-3 grid grid-cols-2 gap-1.5">
-              <button type="button" className="btn btn-accent" onClick={() => downloadBlob(blob, timestampName('stillframe', 'webm'))}>
-                <Download size={14} /> 下载
-              </button>
-              <button type="button" className="btn" onClick={save}>
-                <Save size={14} /> 存图库
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        <div className="mt-auto p-4">
-          <button type="button" className="btn btn-ghost w-full" onClick={onClose}>
-            返回捕捉台
+      {url ? (
+        <div className="absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-[3px] bg-[#1F2226]/95 px-2 py-1.5 ring-1 ring-white/10">
+          <Video size={14} className="text-[#5FD3FF]" />
+          <span className="font-mono text-[11px] text-[#C7CDD3]">
+            {blob ? `${(blob.size / 1024 / 1024).toFixed(2)} MB` : ''} · {formatClock(seconds)}
+          </span>
+          <button
+            type="button"
+            className="ml-1 rounded-[2px] bg-[#12B7F5] px-2 py-1 text-[11.5px] text-[#04212E]"
+            onClick={() => blob && downloadBlob(blob, timestampName('stillframe', 'webm'))}
+          >
+            下载
           </button>
-          <p className="mt-2 text-[11px] leading-5 text-muted">
-            网页端输出 WebM（VP9 / Opus）。要 MP4，请用仓库 desktop 目录里的本地转码脚本。
-          </p>
+          <button type="button" className="rounded-[2px] px-2 py-1 text-[11.5px] text-[#C7CDD3] hover:bg-white/10" onClick={() => void save()}>
+            <Save size={13} />
+          </button>
         </div>
-      </aside>
+      ) : null}
     </div>
   );
 }

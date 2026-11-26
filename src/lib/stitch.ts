@@ -88,3 +88,31 @@ export function stitchVertical(
   ctx.drawImage(bottom, 0, top.height - overlap);
   return { canvas, overlap, confidence };
 }
+
+/** 顺时针 / 逆时针 90°，用于把横向拼接转成纵向算法复用。 */
+function rotate90(source: HTMLCanvasElement, clockwise: boolean): HTMLCanvasElement {
+  const out = document.createElement('canvas');
+  out.width = source.height;
+  out.height = source.width;
+  const ctx = out.getContext('2d');
+  if (!ctx) throw new Error('无法创建画布上下文');
+  ctx.translate(out.width / 2, out.height / 2);
+  ctx.rotate((clockwise ? Math.PI : -Math.PI) / 2);
+  ctx.drawImage(source, -source.width / 2, -source.height / 2);
+  return out;
+}
+
+/**
+ * 长截图工具的方向开关里「水平」那一档：把两张图转成竖向求重叠，
+ * 拼完再转回来，重叠量即列重叠像素数。
+ */
+export function stitchHorizontal(
+  left: HTMLCanvasElement,
+  right: HTMLCanvasElement,
+  options: { overlap?: number; autoDetect?: boolean } = {},
+): StitchResult {
+  const a = rotate90(left, false);
+  const b = rotate90(right, false);
+  const result = stitchVertical(a, b, options);
+  return { canvas: rotate90(result.canvas, true), overlap: result.overlap, confidence: result.confidence };
+}

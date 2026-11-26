@@ -5,8 +5,10 @@ import { drawAnnotations, rectFromPoints } from '../lib/annotate';
 import { canvasToBlob, copyBlobToClipboard, downloadBlob, makeThumbnail, timestampName } from '../lib/image';
 import { putShot } from '../lib/storage';
 import { writeToDirectory } from '../lib/autosave';
+import { applyFilter } from '../lib/filters';
+import { QQ_TEXT, type QqFilterId } from '../lib/qqspec';
 import { useToast } from './Toasts';
-import { EditorTools } from './EditorTools';
+import { QqToolbar } from './QqToolbar';
 import type { Settings } from '../lib/settings';
 
 interface EditorProps {
@@ -15,6 +17,11 @@ interface EditorProps {
   onClose: () => void;
   onSaved: () => void;
   onPin: (dataUrl: string) => void;
+  /** 从工具栏继续做长截图 / 识图 / 翻译 / 录屏，都会把当前成图带过去。 */
+  onLong?: (image: HTMLCanvasElement) => void;
+  onOcr?: (image: HTMLCanvasElement) => void;
+  onTranslate?: (image: HTMLCanvasElement) => void;
+  onRecord?: () => void;
 }
 
 interface TextDraft {
@@ -30,13 +37,14 @@ const nextId = () => {
   return `a${seq}`;
 };
 
-export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps) {
+export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr, onTranslate, onRecord }: EditorProps) {
   const toast = useToast();
   const [tool, setTool] = useState<AnnotationKind>('rect');
-  const [color, setColor] = useState('#E4A03C');
+  const [color, setColor] = useState('#FB3838');
   const [weight, setWeight] = useState(3);
   const [mosaicBlock, setMosaicBlock] = useState(12);
-  const [fontSize, setFontSize] = useState(20);
+  const [fontSize, setFontSize] = useState(18);
+  const [filter, setFilter] = useState<QqFilterId>('none');
   const [history, setHistory] = useState<Annotation[][]>([[]]);
   const [index, setIndex] = useState(0);
   const [draft, setDraft] = useState<Annotation | null>(null);
@@ -49,7 +57,9 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
   const dragRef = useRef<{ start: Point; kind: AnnotationKind } | null>(null);
 
   const annotations = history[index];
-  const dataUrl = useMemo(() => image.toDataURL('image/png'), [image]);
+  /** QQ 的滤镜作用在底图上，标注永远画在滤镜之上。 */
+  const base = useMemo(() => (filter === 'none' ? image : applyFilter(image, filter)), [filter, image]);
+  const dataUrl = useMemo(() => base.toDataURL('image/png'), [base]);
 
   const commit = useCallback(
     (next: Annotation[]) => {
@@ -63,10 +73,9 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
     const wrap = wrapRef.current;
     if (!wrap) return;
     const update = () => {
-      const pad = 40;
-      const cw = Math.max(80, wrap.clientWidth - pad);
-      const ch = Math.max(80, wrap.clientHeight - pad);
-      const ratio = Math.min(cw / image.width, ch / image.height);
+      const cw = Math.max(120, wrap.clientWidth - 96);
+      const ch = Math.max(120, wrap.clientHeight - 118);
+      const ratio = Math.min(cw / image.width, ch / image.height, 1);
       setBox({ w: Math.round(image.width * ratio), h: Math.round(image.height * ratio) });
     };
     update();
@@ -83,8 +92,8 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    drawAnnotations(ctx, draft ? [...annotations, draft] : annotations, { mosaicSource: image });
-  }, [annotations, draft, image]);
+    drawAnnotations(ctx, draft ? [...annotations, draft] : annotations, { mosaicSource: base });
+  }, [annotations, draft, base, image]);
 
   const toImagePoint = useCallback(
     (event: ReactPointerEvent<HTMLCanvasElement>): Point => {
@@ -128,15 +137,13 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
     const rect: Rect = rectFromPoints(drag.start, point);
 
     switch (drag.kind) {
-      case 'pen': {
-        setDraft((prev) => {
-          if (!prev || prev.kind !== 'pen') {
-            return { id: 'draft', kind: 'pen', color, weight, points: [drag.start, point] };
-          }
-          return { ...prev, points: [...prev.points, point] };
-        });
+      case 'pen':
+        setDraft((prev) =>
+          prev && prev.kind === 'pen'
+            ? { ...prev, points: [...prev.points, point] }
+            : { id: 'draft', kind: 'pen', color, weight, points: [drag.start, point] },
+        );
         break;
-      }
       case 'rect':
         setDraft({ id: 'draft', kind: 'rect', color, weight, rect });
         break;
@@ -171,8 +178,7 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
       if (current.points.length < 2) return;
     }
     const { id: _draftId, ...rest } = current;
-    const finished = { ...rest, id: nextId() } as Annotation;
-    commit([...annotations, finished]);
+    commit([...annotations, { ...rest, id: nextId() } as Annotation]);
   };
 
   const compose = useCallback((): HTMLCanvasElement => {
@@ -181,85 +187,101 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
     out.height = image.height;
     const ctx = out.getContext('2d');
     if (!ctx) throw new Error('无法创建导出画布');
-    ctx.drawImage(image, 0, 0);
-    drawAnnotations(ctx, annotations, { mosaicSource: image });
+    ctx.drawImage(base, 0, 0);
+    drawAnnotations(ctx, annotations, { mosaicSource: base });
     return out;
-  }, [annotations, image]);
+  }, [annotations, base, image]);
 
   const persist = useCallback(
-    async (blob: Blob, ext: string, width: number, height: number) => {
+    async (blob: Blob) => {
       await putShot({
         id: `img_${Date.now()}`,
         kind: 'image',
         createdAt: Date.now(),
-        width,
-        height,
+        width: image.width,
+        height: image.height,
         bytes: blob.size,
         blob,
-        thumb: makeThumbnail(image, 240),
+        thumb: makeThumbnail(base, 240),
       });
       if (settings.autoSaveEnabled) {
-        const saved = await writeToDirectory(blob, timestampName('stillframe', ext));
+        const saved = await writeToDirectory(blob, timestampName('stillframe', settings.imageFormat === 'jpeg' ? 'jpg' : 'png'));
         if (!saved) toast('自动保存目录未授权，已只存入图库', 'warn');
       }
       onSaved();
       toast('已存入图库', 'ok');
-      void width;
-      void height;
     },
-    [image, onSaved, settings.autoSaveEnabled, toast],
+    [base, image, onSaved, settings.autoSaveEnabled, settings.imageFormat, toast],
   );
 
-  const handleCopy = async () => {
+  const copyOut = useCallback(async () => {
+    const blob = await canvasToBlob(compose(), 'png');
+    await copyBlobToClipboard(blob);
+  }, [compose]);
+
+  const handleFinish = useCallback(async () => {
     setBusy('正在复制');
     try {
-      const blob = await canvasToBlob(compose(), 'png');
-      await copyBlobToClipboard(blob);
-      toast('已复制到剪贴板', 'ok');
+      await copyOut();
+      toast(QQ_TEXT.copyDone, 'ok');
+      onClose();
     } catch (error) {
       toast(error instanceof Error ? error.message : '复制失败', 'warn');
     } finally {
       setBusy(null);
     }
-  };
+  }, [copyOut, onClose, toast]);
 
-  const handleDownload = async () => {
-    setBusy('正在导出');
+  const handleSave = async () => {
+    setBusy('正在保存');
     try {
       const format = settings.imageFormat;
       const ext = format === 'jpeg' ? 'jpg' : 'png';
       const blob = await canvasToBlob(compose(), format, settings.jpegQuality);
       downloadBlob(blob, timestampName('stillframe', ext));
-      if (settings.autoSaveEnabled) {
-        const saved = await writeToDirectory(blob, timestampName('stillframe', ext));
-        if (!saved) toast('自动保存目录未授权，文件已走浏览器下载', 'warn');
-      }
-      toast('已导出图片', 'ok');
+      await persist(blob);
     } catch (error) {
-      toast(error instanceof Error ? error.message : '导出失败', 'warn');
+      toast(error instanceof Error ? error.message : '保存截图失败', 'warn');
     } finally {
       setBusy(null);
     }
   };
 
-  const handleSave = async () => {
-    setBusy('正在归档');
-    try {
-      const format = settings.imageFormat;
-      const ext = format === 'jpeg' ? 'jpg' : 'png';
-      const blob = await canvasToBlob(compose(), format, settings.jpegQuality);
-      await persist(blob, ext, image.width, image.height);
-    } catch (error) {
-      toast(error instanceof Error ? error.message : '存入图库失败', 'warn');
-    } finally {
-      setBusy(null);
-    }
-  };
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+        return;
+      }
+      if (event.key === 'Enter' && !textDraft) {
+        event.preventDefault();
+        void handleFinish();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        void handleSave();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        if (event.shiftKey) setIndex((prev) => Math.min(history.length - 1, prev + 1));
+        else setIndex((prev) => Math.max(0, prev - 1));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  const size = { w: image.width, h: image.height };
 
   return (
-    <div className="flex min-h-0 flex-1">
-      <div ref={wrapRef} className="stage-grid relative flex min-w-0 flex-1 items-center justify-center p-6">
-        <div className="relative shadow-stage" style={{ width: box.w || image.width, height: box.h || image.height }}>
+    <div className="relative flex min-h-0 flex-1 flex-col bg-ink-950">
+      <div ref={wrapRef} className="relative flex min-h-0 flex-1 items-center justify-center p-6 pb-10">
+        <div
+          className="relative shadow-stage ring-1 ring-white/10"
+          style={{ width: box.w || image.width, height: box.h || image.height }}
+        >
           <img src={dataUrl} alt="截图预览" className="absolute inset-0 h-full w-full" draggable={false} />
           <canvas
             ref={canvasRef}
@@ -272,8 +294,12 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
           />
         </div>
 
-        <div className="pointer-events-none absolute bottom-3 left-4 font-mono text-[10px] tracking-wider text-muted/70">
-          {image.width} × {image.height} PX · ESC 不退出 · 拖动落笔
+        <div className="pointer-events-none absolute left-4 top-3 flex items-center gap-2 font-mono text-[10px] tracking-wider text-muted/70">
+          <span className="border border-white/10 bg-black/40 px-1.5 py-0.5 text-paper/70">{QQ_TEXT.windowCaptureTab}</span>
+          <span>
+            {size.w} × {size.h}
+          </span>
+          <span className="text-muted/50">{QQ_TEXT.operTip}</span>
         </div>
 
         {textDraft ? (
@@ -288,7 +314,7 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
               autoFocus
               value={textDraft.value}
               placeholder="输入文字，回车确认"
-              className="w-[280px] border border-amber bg-ink-900 px-2 py-1.5 text-[13px] text-paper outline-none"
+              className="w-[280px] border border-[#12B7F5] bg-ink-900 px-2 py-1.5 text-[13px] text-paper outline-none"
               onChange={(event) => setTextDraft({ ...textDraft, value: event.target.value })}
               onKeyDown={(event) => {
                 if (event.key === 'Escape') setTextDraft(null);
@@ -311,43 +337,47 @@ export function Editor({ image, settings, onClose, onSaved, onPin }: EditorProps
             />
           </div>
         ) : null}
-      </div>
 
-      <EditorTools
-        state={{
-          tool,
-          color,
-          weight,
-          mosaicBlock,
-          fontSize,
-          count: annotations.length,
-          canUndo: index > 0,
-          canRedo: index < history.length - 1,
-        }}
-        actions={{
-          onTool: setTool,
-          onColor: setColor,
-          onWeight: setWeight,
-          onMosaicBlock: setMosaicBlock,
-          onFontSize: setFontSize,
-          onUndo: () => setIndex((prev) => Math.max(0, prev - 1)),
-          onRedo: () => setIndex((prev) => Math.min(history.length - 1, prev + 1)),
-          onClear: () => commit([]),
-          onCopy: handleCopy,
-          onDownload: handleDownload,
-          onSave: handleSave,
-          onPin: () => {
-            try {
-              onPin(compose().toDataURL('image/png'));
-            } catch {
-              toast('贴图失败', 'warn');
-            }
-          },
-          onClose,
-        }}
-        size={{ w: image.width, h: image.height }}
-        busy={busy}
-      />
+        <div className="absolute bottom-4 right-4 z-20">
+          <QqToolbar
+            state={{
+              tool,
+              color,
+              weight,
+              mosaicBlock,
+              fontSize,
+              filter,
+              count: annotations.length,
+              canUndo: index > 0,
+            }}
+            actions={{
+              onTool: setTool,
+              onColor: setColor,
+              onWeight: setWeight,
+              onMosaicBlock: setMosaicBlock,
+              onFontSize: setFontSize,
+              onFilter: setFilter,
+              onUndo: () => setIndex((prev) => Math.max(0, prev - 1)),
+              onSave: () => void handleSave(),
+              onLong: () => onLong?.(compose()),
+              onTranslate: () => onTranslate?.(compose()),
+              onOcr: () => onOcr?.(compose()),
+              onPin: () => {
+                try {
+                  onPin(compose().toDataURL('image/png'));
+                } catch {
+                  toast('贴图失败', 'warn');
+                }
+              },
+              onRecord: () => onRecord?.(),
+              onExit: onClose,
+              onFinish: () => void handleFinish(),
+            }}
+            busy={busy}
+            allowRecord={Boolean(onRecord)}
+          />
+        </div>
+      </div>
     </div>
   );
 }

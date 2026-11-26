@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Maximize2, X } from 'lucide-react';
+import { Maximize2, X } from 'lucide-react';
 import type { Rect } from '../lib/types';
+import { QQ_TEXT } from '../lib/qqspec';
 
 interface SelectionOverlayProps {
   frame: HTMLCanvasElement;
@@ -16,9 +17,18 @@ interface DragState {
   currentY: number;
 }
 
+/** QQ 的尺寸放大镜：外框 132×152，取景区 117×84，下面是尺寸与色值（ScreenCaptureWnd/MagnifierFrame）。 */
+const MAG_W = 132;
+const MAG_H = 152;
+const MAG_ZOOM = 8;
+
 export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: SelectionOverlayProps) {
   const [drag, setDrag] = useState<DragState | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
+  const [probe, setProbe] = useState<{ hex: string; r: number; g: number; b: number } | null>(null);
+  const magRef = useRef<HTMLCanvasElement | null>(null);
+  const probeRef = useRef<HTMLCanvasElement | null>(null);
   const dataUrl = useMemo(() => frame.toDataURL('image/png'), [frame]);
   const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
 
@@ -62,14 +72,55 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
     [onConfirm, scaleX, scaleY],
   );
 
+  /** 放大镜取景 + 像素色号，对应 QQ 的 Camera_Rect_Information / Camera_Color_Information。 */
+  useEffect(() => {
+    if (!cursor) {
+      setProbe(null);
+      return;
+    }
+    const px = Math.min(frame.width - 1, Math.max(0, Math.round(cursor.x * scaleX)));
+    const py = Math.min(frame.height - 1, Math.max(0, Math.round(cursor.y * scaleY)));
+    const srcW = MAG_W / MAG_ZOOM;
+    const srcH = 84 / MAG_ZOOM;
+    const sx = Math.max(0, Math.min(frame.width - srcW, px - srcW / 2));
+    const sy = Math.max(0, Math.min(frame.height - srcH, py - srcH / 2));
+
+    const mag = magRef.current;
+    if (mag) {
+      const ctx = mag.getContext('2d');
+      if (ctx) {
+        ctx.imageSmoothingEnabled = false;
+        ctx.clearRect(0, 0, mag.width, mag.height);
+        ctx.drawImage(frame, sx, sy, srcW, srcH, 0, 0, mag.width, mag.height);
+      }
+    }
+
+    const probeCanvas = probeRef.current ?? document.createElement('canvas');
+    probeRef.current = probeCanvas;
+    probeCanvas.width = 1;
+    probeCanvas.height = 1;
+    const pctx = probeCanvas.getContext('2d');
+    if (pctx) {
+      pctx.drawImage(frame, px, py, 1, 1, 0, 0, 1, 1);
+      const [r, g, b] = pctx.getImageData(0, 0, 1, 1).data;
+      const hex = `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+      setProbe({ hex, r, g, b });
+    }
+  }, [cursor, frame, scaleX, scaleY]);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onCancel();
       if (event.key === 'Enter' && rect && rect.w > 6) commit(rect);
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c' && probe) {
+        void navigator.clipboard?.writeText(probe.hex).catch(() => undefined);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onCancel, commit, rect]);
+  }, [commit, onCancel, probe, rect]);
+
+  const full = { x: 0, y: 0, w: viewport.w, h: viewport.h };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -81,9 +132,10 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
   };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const point = toScreen(event.clientX, event.clientY);
+    setCursor(point);
     const state = dragRef.current;
     if (!state) return;
-    const point = toScreen(event.clientX, event.clientY);
     const next = { ...state, currentX: point.x, currentY: point.y };
     dragRef.current = next;
     setDrag(next);
@@ -93,9 +145,10 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
     dragRef.current = null;
   };
 
-  const actual = rect
-    ? { w: Math.round(rect.w * scaleX), h: Math.round(rect.h * scaleY) }
-    : null;
+  const actual = rect ? { w: Math.round(rect.w * scaleX), h: Math.round(rect.h * scaleY) } : null;
+
+  const magLeft = cursor ? (cursor.x + MAG_W + 24 > viewport.w ? cursor.x - MAG_W - 18 : cursor.x + 18) : 0;
+  const magTop = cursor ? (cursor.y + MAG_H + 24 > viewport.h ? cursor.y - MAG_H - 18 : cursor.y + 18) : 0;
 
   return (
     <div
@@ -103,6 +156,11 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      onDoubleClick={() => commit(rect ?? full)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onCancel();
+      }}
     >
       <img
         src={dataUrl}
@@ -113,60 +171,91 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
 
       {rect ? (
         <>
-          <div className="pointer-events-none absolute bg-ink-950/62" style={{ left: 0, top: 0, width: '100%', height: rect.y }} />
-          <div className="pointer-events-none absolute bg-ink-950/62" style={{ left: 0, top: rect.y + rect.h, width: '100%', height: Math.max(0, viewport.h - rect.y - rect.h) }} />
-          <div className="pointer-events-none absolute bg-ink-950/62" style={{ left: 0, top: rect.y, width: rect.x, height: rect.h }} />
-          <div className="pointer-events-none absolute bg-ink-950/62" style={{ left: rect.x + rect.w, top: rect.y, width: Math.max(0, viewport.w - rect.x - rect.w), height: rect.h }} />
+          <div className="pointer-events-none absolute bg-black/55" style={{ left: 0, top: 0, width: '100%', height: rect.y }} />
+          <div
+            className="pointer-events-none absolute bg-black/55"
+            style={{ left: 0, top: rect.y + rect.h, width: '100%', height: Math.max(0, viewport.h - rect.y - rect.h) }}
+          />
+          <div className="pointer-events-none absolute bg-black/55" style={{ left: 0, top: rect.y, width: rect.x, height: rect.h }} />
+          <div
+            className="pointer-events-none absolute bg-black/55"
+            style={{ left: rect.x + rect.w, top: rect.y, width: Math.max(0, viewport.w - rect.x - rect.w), height: rect.h }}
+          />
 
           <div
-            className="pointer-events-none absolute border border-amber"
+            className="pointer-events-none absolute border border-[#12B7F5]"
             style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}
           >
-            <span className="frame-corner -left-px -top-px border-l-2 border-t-2" />
-            <span className="frame-corner -right-px -top-px border-r-2 border-t-2" />
-            <span className="frame-corner -bottom-px -left-px border-b-2 border-l-2" />
-            <span className="frame-corner -bottom-px -right-px border-b-2 border-r-2" />
+            {[
+              'left-0 top-0',
+              'right-0 top-0',
+              'bottom-0 left-0',
+              'bottom-0 right-0',
+            ].map((pos) => (
+              <span key={pos} className={`absolute ${pos} h-[5px] w-[5px] -translate-x-1/2 -translate-y-1/2 bg-[#12B7F5]`} />
+            ))}
             {actual ? (
-              <span className="absolute -top-7 left-0 bg-ink-900/90 px-1.5 py-0.5 font-mono text-[11px] tabular text-amber">
+              <span className="absolute -top-[22px] left-0 whitespace-nowrap bg-[#12B7F5] px-1.5 py-0.5 font-mono text-[11px] tabular text-[#04212E]">
                 {actual.w} × {actual.h}
               </span>
             ) : null}
           </div>
         </>
       ) : (
-        <div className="pointer-events-none absolute inset-0 bg-ink-950/62" />
+        <div className="pointer-events-none absolute inset-0 bg-black/45" />
       )}
 
-      <div className="pointer-events-none absolute inset-x-0 top-8 flex justify-center">
-        <span className="border border-ink-600 bg-ink-900/90 px-3 py-1.5 font-mono text-[11px] tracking-wide text-paper/80">
+      {/* 放大镜：QQ 取景区 117×84 + 尺寸/色号明细 */}
+      {cursor ? (
+        <div
+          className="pointer-events-none absolute overflow-hidden rounded-[2px] bg-[#1B1E22] ring-1 ring-white/15"
+          style={{ left: magLeft, top: magTop, width: MAG_W, height: MAG_H }}
+        >
+          <canvas ref={magRef} width={117} height={84} className="absolute left-[7px] top-[7px] h-[84px] w-[117px]" />
+          <div className="absolute left-[7px] top-[93px] h-px w-[117px] bg-white/15" />
+          <div className="absolute left-[9px] top-[99px] font-mono text-[11px] text-white/90">
+            {actual ? `${actual.w} x ${actual.h}` : `${frame.width} x ${frame.height}`}
+          </div>
+          <div className="absolute left-[9px] top-[115px] font-mono text-[11px] text-white/70">
+            {probe ? `RGB(${probe.r},${probe.g},${probe.b})` : 'RGB(--,--,--)'}
+          </div>
+          <div className="absolute left-[9px] top-[131px] text-[10px] text-white/45">{QQ_TEXT.altHint}</div>
+        </div>
+      ) : null}
+
+      <div className="pointer-events-none absolute inset-x-0 top-6 flex justify-center">
+        <span className="rounded-[2px] border border-white/10 bg-[#1F2226]/90 px-3 py-1.5 text-[11.5px] tracking-wide text-white/80">
           {hint}
         </span>
       </div>
 
-      <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2 items-center gap-2 border border-ink-600 bg-ink-900/95 px-2 py-2 shadow-pop">
+      <div className="absolute bottom-5 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-[3px] bg-[#1F2226]/95 px-1.5 py-1 ring-1 ring-white/10">
         <button
           type="button"
-          className="btn btn-ghost !py-1.5"
+          className="flex items-center gap-1 rounded-[2px] px-2 py-1 text-[11.5px] text-white/80 hover:bg-white/10"
           onClick={() => {
-            const full = { x: 0, y: 0, w: viewport.w, h: viewport.h };
             setDrag({ startX: 0, startY: 0, currentX: viewport.w, currentY: viewport.h });
             dragRef.current = { startX: 0, startY: 0, currentX: viewport.w, currentY: viewport.h };
             commit(full);
           }}
         >
-          <Maximize2 size={14} /> 整屏
+          <Maximize2 size={13} /> 整屏
         </button>
-        <span className="sprocket w-10 opacity-40" />
-        <button type="button" className="btn btn-ghost !py-1.5" onClick={onCancel}>
-          <X size={14} /> 取消
+        <span className="h-[14px] w-px bg-white/15" />
+        <button
+          type="button"
+          className="flex items-center gap-1 rounded-[2px] px-2 py-1 text-[11.5px] text-white/80 hover:bg-white/10"
+          onClick={onCancel}
+        >
+          <X size={13} /> {QQ_TEXT.exitTip}
         </button>
         <button
           type="button"
-          className="btn btn-accent !py-1.5"
+          className="rounded-[2px] bg-[#12B7F5] px-2.5 py-1 text-[11.5px] font-medium text-[#04212E] hover:bg-[#3AC5FA] disabled:opacity-40"
           disabled={!rect || rect.w < 6 || rect.h < 6}
           onClick={() => rect && commit(rect)}
         >
-          <Check size={14} /> 确认
+          {QQ_TEXT.finish}
         </button>
       </div>
     </div>

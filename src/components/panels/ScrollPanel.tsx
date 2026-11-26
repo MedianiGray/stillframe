@@ -1,9 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, Layers, Plus, RotateCcw, X } from 'lucide-react';
+import {
+  ArrowDownUp,
+  ArrowRightLeft,
+  Check,
+  Copy,
+  Layers,
+  Pencil,
+  Plus,
+  RotateCcw,
+  Save,
+  Share2,
+  X,
+} from 'lucide-react';
 import type { Rect } from '../../lib/types';
 import type { ScreenSession } from '../../lib/capture';
 import { grabRegion } from '../../lib/capture';
-import { stitchVertical } from '../../lib/stitch';
+import { stitchHorizontal, stitchVertical } from '../../lib/stitch';
+import { canvasToBlob, copyBlobToClipboard, downloadBlob, timestampName } from '../../lib/image';
+import { QQ_TEXT } from '../../lib/qqspec';
 import { useToast } from '../Toasts';
 
 interface ScrollPanelProps {
@@ -14,12 +28,19 @@ interface ScrollPanelProps {
   onFinish: (image: HTMLCanvasElement) => void;
 }
 
+const BTN =
+  'flex h-[30px] w-[30px] items-center justify-center rounded-[2px] text-[#D6DBE0] transition-colors hover:bg-white/10 disabled:opacity-35';
+const BTN_ON = 'bg-[#12B7F5]/22 text-[#5FD3FF] ring-1 ring-[#12B7F5]/60';
+
 export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPanelProps) {
   const toast = useToast();
   const [result, setResult] = useState<HTMLCanvasElement>(seed);
   const [frames, setFrames] = useState(1);
   const [lastOverlap, setLastOverlap] = useState<number | null>(null);
   const [manualOverlap, setManualOverlap] = useState('');
+  const [direction, setDirection] = useState<'v' | 'h'>('v');
+  const [autoScroll, setAutoScroll] = useState(false);
+  const [showManual, setShowManual] = useState(false);
   const [busy, setBusy] = useState(false);
   const holderRef = useRef<HTMLDivElement | null>(null);
 
@@ -38,10 +59,8 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
     try {
       const next = grabRegion(session.video, rect);
       const manual = manualOverlap.trim() ? Number(manualOverlap) : undefined;
-      const stitched = stitchVertical(result, next, {
-        autoDetect: manual === undefined,
-        overlap: manual,
-      });
+      const stitch = direction === 'v' ? stitchVertical : stitchHorizontal;
+      const stitched = stitch(result, next, { autoDetect: manual === undefined, overlap: manual });
       setResult(stitched.canvas);
       setFrames((n) => n + 1);
       setLastOverlap(stitched.overlap);
@@ -63,75 +82,128 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
     setLastOverlap(null);
   };
 
+  const save = async () => {
+    setBusy(true);
+    try {
+      const blob = await canvasToBlob(result, 'png');
+      downloadBlob(blob, timestampName('stillframe-long', 'png'));
+      toast('长截图已保存', 'ok');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '保存失败', 'warn');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async () => {
+    setBusy(true);
+    try {
+      const blob = await canvasToBlob(result, 'png');
+      await copyBlobToClipboard(blob);
+      toast(QQ_TEXT.copyDone, 'ok');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '复制失败', 'warn');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <div className="flex min-h-0 flex-1">
-      <div className="stage-grid relative flex min-w-0 flex-1 items-center justify-center overflow-auto p-6">
+    <div className="relative flex min-h-0 flex-1 flex-col bg-ink-950">
+      <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto p-6 pb-16">
         <div ref={holderRef} className="flex max-h-full items-center justify-center" />
-        <div className="pointer-events-none absolute bottom-3 left-4 font-mono text-[10px] tracking-wider text-muted/70">
-          {result.width} × {result.height} PX · {frames} 屏
+        <div className="pointer-events-none absolute left-4 top-3 flex items-center gap-2 font-mono text-[10px] tracking-wider text-muted/70">
+          <span className="border border-white/10 bg-black/40 px-1.5 py-0.5 text-paper/70">{QQ_TEXT.longTool}</span>
+          <span>
+            {result.width} × {result.height} · {frames} 屏
+          </span>
+          {lastOverlap !== null ? <span className="text-muted/50">重叠 {lastOverlap}px</span> : null}
         </div>
       </div>
 
-      <aside className="flex w-[320px] shrink-0 flex-col overflow-y-auto border-l border-ink-600/50 bg-ink-900">
-        <div className="border-b border-ink-600/50 p-4">
-          <div className="flex items-center gap-2">
-            <Layers size={13} className="text-amber" />
-            <span className="label">滚动拼接</span>
-          </div>
-          <p className="mt-2 text-[12px] leading-5 text-muted">
-            现在切到你要截的窗口，把它滚动一屏，然后回到这里点「追加一屏」。重复到内容截完为止。
-          </p>
-          <div className="mt-3 grid grid-cols-2 gap-1.5">
-            <button type="button" className="btn btn-accent" disabled={busy} onClick={append}>
-              <Plus size={14} /> 追加一屏
-            </button>
-            <button type="button" className="btn" disabled={busy || frames === 1} onClick={reset}>
-              <RotateCcw size={14} /> 重来
-            </button>
-          </div>
-          {lastOverlap !== null ? (
-            <p className="mt-2 font-mono text-[11px] text-muted">上次重叠 {lastOverlap}px</p>
-          ) : null}
+      {/* QQ 长截图工具栏：方向选择 / 自动滚动 / 编辑 / 转发 / 保存 / 退出 / 完成 */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2">
+        <div className="flex items-center gap-0.5 rounded-[3px] bg-[#1F2226]/95 px-1.5 py-1 shadow-[0_6px_22px_rgba(0,0,0,0.45)] ring-1 ring-white/10">
+          <button
+            type="button"
+            title="选择滚动方向"
+            className={`${BTN} ${direction === 'v' ? BTN_ON : ''}`}
+            onClick={() => setDirection((d) => (d === 'v' ? 'h' : 'v'))}
+          >
+            {direction === 'v' ? <ArrowDownUp size={16} strokeWidth={1.7} /> : <ArrowRightLeft size={16} strokeWidth={1.7} />}
+          </button>
+          <button type="button" title="追加一屏" className={`${BTN} bg-white/5`} disabled={busy} onClick={append}>
+            <Plus size={16} strokeWidth={1.8} />
+          </button>
+          <button
+            type="button"
+            title={autoScroll ? '停止自动滚动（桌面壳）' : '自动滚动（桌面壳，网页端不可用）'}
+            className={`${BTN} ${autoScroll ? BTN_ON : ''}`}
+            onClick={() => {
+              if (autoScroll) {
+                setAutoScroll(false);
+                return;
+              }
+              toast('自动滚动需要向目标窗口发送滚轮事件，仅桌面壳支持；网页端请手动滚动后点追加', 'warn');
+            }}
+          >
+            <Layers size={16} strokeWidth={1.7} />
+          </button>
+          <button type="button" title="手动重叠" className={BTN} onClick={() => setShowManual((v) => !v)}>
+            <RotateCcw size={16} strokeWidth={1.7} />
+          </button>
+
+          <span className="mx-1 h-[16px] w-px bg-white/15" />
+
+          <button type="button" title={QQ_TEXT.ocrEdit} className={BTN} onClick={() => onFinish(result)}>
+            <Pencil size={16} strokeWidth={1.7} />
+          </button>
+          <button type="button" title={QQ_TEXT.transfer} className={BTN} onClick={() => void copy()}>
+            <Share2 size={16} strokeWidth={1.7} />
+          </button>
+          <button type="button" title={QQ_TEXT.saveTip} className={BTN} onClick={() => void save()}>
+            <Save size={16} strokeWidth={1.7} />
+          </button>
+
+          <span className="mx-1 h-[16px] w-px bg-white/15" />
+
+          <button type="button" title={QQ_TEXT.exitTip} className={BTN} onClick={onClose}>
+            <X size={16} strokeWidth={1.8} />
+          </button>
+          <button
+            type="button"
+            title={QQ_TEXT.transfer}
+            className="ml-0.5 flex h-[30px] items-center gap-1 rounded-[2px] bg-[#12B7F5] px-2.5 text-[12px] font-medium text-[#04212E] hover:bg-[#3AC5FA]"
+            onClick={() => {
+              session.stop();
+              onFinish(result);
+            }}
+          >
+            <Check size={14} strokeWidth={2.2} />
+            {QQ_TEXT.finish}
+          </button>
         </div>
 
-        <div className="border-b border-ink-600/50 p-4">
-          <span className="label">手动重叠（可选）</span>
-          <div className="mt-2 flex items-center gap-2">
+        {showManual ? (
+          <div className="mt-1.5 flex items-center gap-2 rounded-[3px] bg-[#1F2226]/95 px-2 py-1.5 ring-1 ring-white/10">
+            <span className="text-[11px] text-[#98A2AC]">手动重叠</span>
             <input
-              className="field !py-1.5"
+              className="w-[92px] rounded-[2px] border border-white/15 bg-black/30 px-1.5 py-1 font-mono text-[11px] text-white outline-none"
               inputMode="numeric"
-              placeholder="例如 120，留空为自动"
+              placeholder="自动"
               value={manualOverlap}
               onChange={(event) => setManualOverlap(event.target.value.replace(/[^\d]/g, ''))}
             />
-            <span className="font-mono text-[11px] text-muted">px</span>
-          </div>
-          <p className="mt-2 text-[11px] leading-5 text-muted">
-            自动匹配在纯色区域可能失败。此时手动填入两屏之间的重复高度，通常是一屏高度的 10%–30%。
-          </p>
-        </div>
-
-        <div className="p-4">
-          <div className="grid grid-cols-2 gap-1.5">
-            <button
-              type="button"
-              className="btn btn-accent"
-              onClick={() => {
-                session.stop();
-                onFinish(result);
-              }}
-            >
-              <Check size={14} /> 完成拼接
+            <span className="font-mono text-[11px] text-[#98A2AC]">px</span>
+            <button type="button" className="text-[11px] text-[#5FD3FF]" onClick={reset}>
+              重来
             </button>
-            <button type="button" className="btn" onClick={onClose}>
-              <X size={14} /> 放弃
+            <button type="button" className="text-[11px] text-[#98A2AC] hover:text-white" onClick={() => void copy()}>
+              <Copy size={12} />
             </button>
           </div>
-          <p className="mt-3 text-[11px] leading-5 text-muted">
-            完成后会进入标注台，可继续加箭头、马赛克或文字，再导出。
-          </p>
-        </div>
-      </aside>
+        ) : null}
+      </div>
     </div>
   );
 }

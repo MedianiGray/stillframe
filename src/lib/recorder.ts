@@ -25,6 +25,13 @@ export class RegionRecorder {
   private audioContext: AudioContext | null = null;
   private mixedStream: MediaStream | null = null;
   private paused = false;
+  /** 录制时叠加的标注层：QQ 录屏工具条画的箭头/文字/激光都从这里进画面。 */
+  private overlay: ((ctx: CanvasRenderingContext2D, w: number, h: number) => void) | null = null;
+
+  /** 运行中替换叠加层，配合面板里的撤销/清除即时生效。 */
+  setOverlay(draw: ((ctx: CanvasRenderingContext2D, w: number, h: number) => void) | null): void {
+    this.overlay = draw;
+  }
 
   constructor(video: HTMLVideoElement | HTMLCanvasElement, options: RecorderOptions) {
     this.video = video;
@@ -83,6 +90,13 @@ export class RegionRecorder {
           );
         } catch {
           // frame not ready yet
+        }
+        if (!this.paused) {
+          try {
+            this.overlay?.(this.ctx, this.canvas.width, this.canvas.height);
+          } catch {
+            // overlay draw must never kill the recording loop
+          }
         }
       }
       this.rafId = window.requestAnimationFrame(draw);

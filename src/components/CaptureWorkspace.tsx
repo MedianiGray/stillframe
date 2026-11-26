@@ -25,7 +25,7 @@ interface WorkspaceProps {
 type State =
   | { kind: 'idle' }
   | { kind: 'selecting'; mode: ToolMode; frame: HTMLCanvasElement; session: ScreenSession | null }
-  | { kind: 'edit'; image: HTMLCanvasElement }
+  | { kind: 'edit'; image: HTMLCanvasElement; rect: Rect }
   | { kind: 'scroll'; image: HTMLCanvasElement; rect: Rect; session: ScreenSession }
   | { kind: 'record'; rect: Rect; session: ScreenSession }
   | { kind: 'ocr'; image: HTMLCanvasElement }
@@ -38,15 +38,15 @@ const MODE_META: Record<
   snap: {
     title: '区域截图',
     tagline: '框一块屏幕，立刻落笔标注',
-    detail: '冻结当前画面后自由框选，随后进入标注台：矩形、椭圆、箭头、画笔、高亮、马赛克、文字、序号，一次成图。',
-    keys: ['框选后可直接标注', '支持整屏一键选取', '导出 PNG / JPEG 并可复制到剪贴板'],
+    detail: '冻结当前画面后自由框选，随后进入标注台：矩形、椭圆、箭头、画刷、马赛克、文字、序号笔，配 12 色 QQ 原值色板、三档线宽与 12 款滤镜，一次成图。',
+    keys: ['框选时带 8 倍放大镜与色号', '工具栏顺序对齐 QQ 截图', '导出 PNG / JPEG 并可复制到剪贴板'],
     icon: Crop,
     accent: 'Ctrl + Alt + S',
   },
   scroll: {
     title: '滚动长图',
     tagline: '一边滚，一边把画面缝起来',
-    detail: '锁定一个区域后，你在目标窗口里滚动内容，每滚一屏点一次追加，程序自动寻找重叠行并拼接成整页长图。',
+    detail: '锁定一个区域后，你在目标窗口里滚动内容，每滚一屏点一次追加，程序自动寻找重叠行并拼接成整页长图；纵向、横向都成立。',
     keys: ['按行特征自动对重叠', '可手动指定重叠像素', '拼接结果可继续标注导出'],
     icon: ScrollText,
     accent: 'Ctrl + Alt + C',
@@ -54,8 +54,8 @@ const MODE_META: Record<
   record: {
     title: '区域录屏',
     tagline: '只录你要的那一块',
-    detail: '框定区域后按帧裁切录制，可同时收录系统声音与麦克风，停止后直接导出视频文件。',
-    keys: ['区域裁切录制', '系统声 + 麦克风混音', '支持暂停与计时'],
+    detail: '框定区域后按帧裁切录制，可同时收录系统声音与麦克风；录制中用 QQ 录屏条那六件套边讲边画，标注会合进成片。',
+    keys: ['区域裁切录制', '系统声 + 麦克风混音', '录制中可标注、可激光笔'],
     icon: Video,
     accent: 'Ctrl + Alt + R',
   },
@@ -136,7 +136,7 @@ export function CaptureWorkspace({
     if (target === 'snap') {
       session?.stop();
       sessionRef.current = null;
-      setState({ kind: 'edit', image });
+      setState({ kind: 'edit', image, rect });
       return;
     }
     if (target === 'scroll') {
@@ -165,11 +165,55 @@ export function CaptureWorkspace({
     setState({ kind: 'idle' });
   };
 
+  /**
+   * QQ 工具栏里的「长截图 / 屏幕录制」是接着当前这块选区继续做，
+   * 网页端必须重新走一次屏幕授权，桌面壳则直接开原生帧源。
+   */
+  const reopenSession = async (audio: boolean) => {
+    const session = isDesktop() ? await openNativeSession() : await openScreenSession({ audio });
+    sessionRef.current = session;
+    return session;
+  };
+
+  const longFromEditor = async (canvas: HTMLCanvasElement, rect: Rect) => {
+    setLoading(true);
+    try {
+      const session = await reopenSession(false);
+      setState({ kind: 'scroll', image: canvas, rect, session });
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '长截图需要再授权一次屏幕捕捉', 'warn');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const recordFromEditor = async (rect: Rect) => {
+    setLoading(true);
+    try {
+      const session = await reopenSession(true);
+      setState({ kind: 'record', rect, session });
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '录屏需要再授权一次屏幕捕捉', 'warn');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   if (state.kind === 'selecting') {
     return (
       <SelectionOverlay
         frame={state.frame}
-        hint={`框选要${MODE_META[state.mode].title}的区域 · Esc 取消 · Enter 确认`}
+        hint={
+          state.mode === 'ocr'
+            ? '框选识别文字 · 双击快速完成 · 右键退出'
+            : state.mode === 'translate'
+              ? '框选翻译文字 · 双击快速完成 · 右键退出'
+              : state.mode === 'record'
+                ? '框选录屏区域 · 双击快速开始 · 右键退出'
+                : state.mode === 'scroll'
+                  ? '框选长截图区域 · 双击快速完成 · 右键退出'
+                  : '拖动框选区域 · 双击快速完成 · 右键退出'
+        }
         onCancel={() => {
           stopSession();
           setState({ kind: 'idle' });
@@ -187,6 +231,10 @@ export function CaptureWorkspace({
         onClose={() => setState({ kind: 'idle' })}
         onSaved={onLibraryChanged}
         onPin={onPin}
+        onLong={(canvas) => void longFromEditor(canvas, state.rect)}
+        onOcr={(canvas) => setState({ kind: 'ocr', image: canvas })}
+        onTranslate={(canvas) => setState({ kind: 'translate', image: canvas })}
+        onRecord={() => void recordFromEditor(state.rect)}
       />
     );
   }
@@ -198,7 +246,9 @@ export function CaptureWorkspace({
         rect={state.rect}
         session={state.session}
         onClose={finish}
-        onFinish={(image) => setState({ kind: 'edit', image })}
+        onFinish={(image) =>
+          setState({ kind: 'edit', image, rect: { x: 0, y: 0, w: image.width, h: image.height } })
+        }
       />
     );
   }
