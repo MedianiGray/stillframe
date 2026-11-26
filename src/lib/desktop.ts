@@ -164,6 +164,18 @@ export async function nativeListWindows(): Promise<NativeWindow[]> {
   return Array.isArray(rows) ? (rows as NativeWindow[]) : [];
 }
 
+/** 读桌面壳内置的 OCR 语言包（gz 的 base64），让取字不依赖网络。 */
+export async function nativeTessdata(lang: string): Promise<string | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  try {
+    const data = await invoke('read_tessdata', { lang });
+    return typeof data === 'string' && data ? data : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 截图前藏起自己（对应「隐藏当前窗口」）。 */
 export async function nativeHideSelf(): Promise<void> {
   const bridge = androidBridge();

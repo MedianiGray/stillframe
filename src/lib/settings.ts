@@ -16,7 +16,7 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   ocrLang: 'chi_sim+eng',
-  tessdataPath: 'https://tessdata.projectnaptha.com/4.0.0',
+  tessdataPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
   translateProvider: 'none',
   translateEndpoint: '',
   translateKey: '',

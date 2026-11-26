@@ -14,7 +14,7 @@ COPY . .
 RUN npm run build
 
 FROM ${NGINX_IMAGE}
-ARG TESSDATA_BASE=https://tessdata.projectnaptha.com/4.0.0
+ARG TESSDATA_BASE=https://tessdata.projectnaptha.com/4.0.0_fast
 ARG TESS_LANGS="chi_sim eng"
 RUN apk add --no-cache curl \
  && mkdir -p /usr/share/nginx/html/tessdata \

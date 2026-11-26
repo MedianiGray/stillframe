@@ -74,6 +74,8 @@ systemAudio / mic ──► AudioContext 混音 ──► audio track
 | 命令 | 入参 | 返回 | 用途 |
 | --- | --- | --- | --- |
 | `capture_screen` | — | `data:image/png;base64,...` | 整屏抓帧，免授权 |
+| `capture_window` | `id` | `data:image/png;base64,...` | 按窗口 id 抓整窗（含被遮挡部分），最小化报错 |
+| `read_tessdata` | `lang` | base64 字符串 | 读取随壳内置的 gz 语言包，离线取字零网络 |
 | `pin_image` | `dataUrl`, `width?`, `height?` | — | 按原图比例开置顶贴图窗口（上限 20 张） |
 | `save_png` | `dataUrl`, `suggestedName` | 保存路径 | 系统保存对话框 |
 | `write_shot` | `dataUrl`, `suggestedName` | 落盘路径 | 静默写入 `图片/Stillframe`，供自动保存 |

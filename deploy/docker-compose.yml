@@ -11,7 +11,7 @@ services:
       dockerfile: deploy/Dockerfile
       args:
         NPM_REGISTRY: https://registry.npmmirror.com
-        TESSDATA_BASE: https://tessdata.projectnaptha.com/4.0.0
+        TESSDATA_BASE: https://tessdata.projectnaptha.com/4.0.0_fast
     image: stillframe-web:lab
     container_name: stillframe-web
     ports:

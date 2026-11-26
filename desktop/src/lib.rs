@@ -272,6 +272,32 @@ fn capture_window(id: u32) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{}", STANDARD.encode(png_bytes)))
 }
 
+/// 把随应用打包的 OCR 语言包读给前端。
+/// 桌面壳不依赖网络取 language data：离线机房、内网、代理环境都能直接取字。
+#[tauri::command]
+fn read_tessdata(app: AppHandle, lang: String) -> Result<String, String> {
+    let file = format!("{lang}.traineddata.gz");
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(dir) = app.path().resource_dir() {
+        candidates.push(dir.join("tessdata").join(&file));
+        candidates.push(dir.join(&file));
+    }
+    if let Ok(dir) = app.path().app_config_dir() {
+        candidates.push(dir.join("tessdata").join(&file));
+    }
+    candidates.push(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tessdata")
+            .join(&file),
+    );
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(&path) {
+            return Ok(STANDARD.encode(bytes));
+        }
+    }
+    Err(format!("没有找到内置语言包 {file}，可改用在线源或把 tessdata 放到应用资源目录"))
+}
+
 /// 截图前把自己藏起来，避免把 Stillframe 自己拍进画面。
 #[tauri::command]
 fn hide_self(window: tauri::WebviewWindow) -> Result<(), String> {
@@ -471,6 +497,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             capture_screen,
             capture_window,
+            read_tessdata,
             pin_image,
             save_png,
             write_shot,

@@ -170,7 +170,10 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onDoubleClick={() => commit(rect ?? full)}
+      onDoubleClick={() => {
+        // 只有已经框出可用选区时双击才收口；空白处双击不该直接吞掉整屏。
+        if (rect && isSelectionUsable(rect)) commit(rect);
+      }}
       onContextMenu={(event) => {
         event.preventDefault();
         onCancel();
@@ -243,7 +246,14 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
         </span>
       </div>
 
-      <div className="absolute bottom-5 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-[3px] bg-[#1F2226]/95 px-1.5 py-1 ring-1 ring-white/10">
+      <div
+        className="absolute bottom-5 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-[3px] bg-[#1F2226]/95 px-1.5 py-1 ring-1 ring-white/10"
+        // 工具条自身要挡住框选：否则按下「完成」会先被根节点当成新选区起点，
+        // 把已有选区重置成 0×0，看起来就是按钮点了没反应。
+        onPointerDown={(event) => event.stopPropagation()}
+        onPointerUp={(event) => event.stopPropagation()}
+        onDoubleClick={(event) => event.stopPropagation()}
+      >
         <button
           type="button"
           className="flex items-center gap-1 rounded-[2px] px-2 py-1 text-[11.5px] text-white/80 hover:bg-white/10"

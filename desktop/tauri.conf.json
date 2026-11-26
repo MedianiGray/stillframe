@@ -30,6 +30,7 @@
     "active": true,
     "targets": "all",
     "icon": ["icons/icon.png"],
+    "resources": ["tessdata/*"],
     "shortDescription": "截图 / 长截图 / 录屏 / OCR / 翻译 三端开源工具",
     "longDescription": "Stillframe 把区域截图、滚动长截图、区域录屏、提取文字与屏幕翻译做成一套可自托管的工具，网页端、桌面端、Android 端共用同一套界面。",
     "category": "Utility",

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Languages, ScanText, Save, X } from 'lucide-react';
 import type { Settings } from '../../lib/settings';
-import { recognize } from '../../lib/ocr';
+import { recognize, toOcrBlob } from '../../lib/ocr';
+import { hostKind, nativeTessdata } from '../../lib/desktop';
 import { makeThumbnail } from '../../lib/image';
 import { putShot } from '../../lib/storage';
 import { useToast } from '../Toasts';
@@ -21,6 +22,15 @@ const LANGS = [
   { id: 'chi_sim', label: '仅中文' },
   { id: 'jpn', label: '日文' },
 ];
+
+/** tesseract 的状态是英文枚举，面板上直接摊给用户不好读，这里翻一层。 */
+const STATUS_TEXT: Record<string, string> = {
+  'loading tesseract core': '加载识别内核',
+  'initializing tesseract': '初始化识别引擎',
+  'loading language traineddata': '首次下载语言包（约 1.7MB）',
+  'initializing api': '准备识别接口',
+  'recognizing text': '正在识别文字',
+};
 
 export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: OcrPanelProps) {
   const toast = useToast();
@@ -42,12 +52,15 @@ export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: Ocr
     setProgress(0);
     setStatus('准备语言包');
     try {
-      const result = await recognize(image, {
+      const blob = await toOcrBlob(image);
+      const result = await recognize(blob, {
         lang,
         langPath: settings.tessdataPath,
+        // 桌面壳内置了语言包：离线也能取字，不依赖 WebView 的网络栈。
+        loadGzBase64: hostKind() === 'tauri' ? (code) => nativeTessdata(code) : undefined,
         onProgress: (value, state) => {
           setProgress(Math.round(value * 100));
-          setStatus(state === 'recognizing text' ? '正在识别' : state);
+          setStatus(STATUS_TEXT[state] ?? state);
         },
       });
       setText(result.text);
@@ -135,8 +148,13 @@ export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: Ocr
                 <div className="h-1 bg-amber transition-all" style={{ width: `${Math.max(4, progress)}%` }} />
               </div>
               <p className="mt-1.5 font-mono text-[10px] text-muted">
-                {status} · {progress}%
+                {status || '准备中'} · {progress}%
               </p>
+              {status.startsWith('首次下载') ? (
+                <p className="mt-1 text-[10.5px] leading-4 text-muted/80">
+                  只有第一次需要下载，之后读本地缓存；内网可把 tessdata 放进站点目录或设置里指定。
+                </p>
+              ) : null}
             </div>
           ) : null}
           {confidence !== null ? (
