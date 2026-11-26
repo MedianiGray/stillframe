@@ -10,7 +10,14 @@
 
 ```bash
 npm run typecheck
+npm test
 npm run build
+```
+
+改到页面交互、图库或设置页时，再跑一遍端到端冒烟（首次需 `npx playwright install chromium`）：
+
+```bash
+npm run test:e2e
 ```
 
 涉及 `desktop/` 的改动，额外跑：

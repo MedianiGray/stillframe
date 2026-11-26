@@ -9,6 +9,12 @@ dist-ssr/
 build/
 *.local
 
+# playwright
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # tauri / rust
 desktop/src-tauri/target/
 desktop/target/

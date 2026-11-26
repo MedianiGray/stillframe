@@ -11,11 +11,10 @@
 - **贴图管理**：贴图按原图比例定窗（桌面 `pin_image` 接收宽高，窗口上限 600×500）；页内贴图支持等比缩放、滚轮缩放、右下角拖拽缩放，数量上限 20 张，超出用 QQ 的 `nailLimit` 文案提示。
 - **识图版面**：`recognize()` 用 tesseract 的行框做段落聚类（行距 + 缩进），返回 `paragraphs`；识图面板新增「段落视图 / 可编辑」切换，可逐段复制，连续文本仍按空行分段。
 - **翻译对照**：原文与译文双栏滚动按比例同步；支持导入 CSV / TSV / JSON 术语表（持久化在 `stillframe.glossary.v1`），OpenAI 兼容接口会把命中的术语写进提示。
-- **测试起步**：接入 vitest，新增 `tests/selection.test.ts`、`tests/glossary.test.ts`（17 条），CI 的 web 任务增加 `npm test`。
+- **测试起步**：接入 vitest，新增 `tests/selection.test.ts`、`tests/glossary.test.ts`（17 条），CI 的 web 任务增加 `npm test`；接入 Playwright，`e2e/smoke.spec.ts` 覆盖首页加载、五种模式切换、图库与设置往返，CI 新增独立 e2e 任务。
 
 ### 待补
 
-- Playwright 主链路 E2E
 - stitch 单测（需要 canvas 环境，计划引入 jsdom + node-canvas 或改用纯函数签名）
 
 ## v0.1 初始开源版
