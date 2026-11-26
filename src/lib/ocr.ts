@@ -16,6 +16,25 @@ export interface OcrOptions {
   onProgress?: (progress: number, status: string) => void;
 }
 
+/**
+ * 语言包目录解析：优先用户配置，其次随站点分发的 ./tessdata（内网/离线部署用），
+ * 最后回落到官方 CDN。只发一次 HEAD，不额外下载体积。
+ */
+async function resolveLangPath(preferred: string): Promise<string> {
+  const candidates = [preferred, './tessdata', 'https://tessdata.projectnaptha.com/4.0.0'];
+  for (const base of candidates) {
+    const trimmed = base.replace(/\/+$/, '');
+    if (!trimmed) continue;
+    try {
+      const response = await fetch(`${trimmed}/eng.traineddata.gz`, { method: 'HEAD' });
+      if (response.ok) return trimmed;
+    } catch {
+      // 跨域/离线都按不可用处理，继续试下一个。
+    }
+  }
+  return preferred.replace(/\/+$/, '');
+}
+
 async function getWorker(options: OcrOptions): Promise<OcrWorker> {
   progressHandler = options.onProgress ?? null;
   if (cache && cache.lang === options.lang) return cache.worker;
@@ -25,8 +44,9 @@ async function getWorker(options: OcrOptions): Promise<OcrWorker> {
     cache = null;
   }
 
+  const langPath = await resolveLangPath(options.langPath);
   const worker = await createWorker(options.lang, 1, {
-    langPath: options.langPath,
+    langPath,
     logger: (message: { status: string; progress: number }) => {
       progressHandler?.(message.progress ?? 0, message.status ?? '');
     },

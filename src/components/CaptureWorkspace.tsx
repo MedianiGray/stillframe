@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowRight, Crop, Languages, ScanText, ScrollText, ShieldAlert, Video } from 'lucide-react';
+import { ArrowRight, Crop, Languages, ScanText, ScrollText, ShieldAlert, Timer, Video } from 'lucide-react';
 import type { Rect, ToolMode } from '../lib/types';
 import type { Settings } from '../lib/settings';
 import { cropCanvas } from '../lib/image';
 import { grabFrame, openNativeSession, openScreenSession, type ScreenSession } from '../lib/capture';
-import { hostKind, isDesktop, nativeCaptureScreen } from '../lib/desktop';
+import { hostKind, isDesktop, nativeCaptureScreen, nativeHideSelf, nativeShowSelf } from '../lib/desktop';
 import { useToast } from './Toasts';
 import { SelectionOverlay } from './SelectionOverlay';
 import { Editor } from './Editor';
@@ -20,6 +20,8 @@ interface WorkspaceProps {
   onOpenSettings: () => void;
   onPin: (dataUrl: string, width: number, height: number) => void;
   onLibraryChanged: () => void;
+  /** 桌面壳热键 / 快捷浮窗送来的一次「直接开拍」请求；tick 变化即触发。 */
+  autoStart?: { mode: ToolMode; tick: number };
 }
 
 type State =
@@ -84,11 +86,17 @@ export function CaptureWorkspace({
   onOpenSettings,
   onPin,
   onLibraryChanged,
+  autoStart,
 }: WorkspaceProps) {
   const toast = useToast();
   const [state, setState] = useState<State>({ kind: 'idle' });
   const [loading, setLoading] = useState(false);
+  const [delay, setDelay] = useState<0 | 3 | 5>(0);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const cancelCountdownRef = useRef(false);
   const sessionRef = useRef<ScreenSession | null>(null);
+  const stateRef = useRef(state);
+  stateRef.current = state;
 
   const stopSession = useCallback(() => {
     sessionRef.current?.stop();
@@ -97,10 +105,33 @@ export function CaptureWorkspace({
 
   useEffect(() => stopSession, [stopSession]);
 
+  /** 单帧类捕捉：延时倒计时结束后先收起自身窗口，抓完再亮出来，避免把自己拍进画面。 */
+  const grabWithoutSelf = async () => {
+    if (hostKind() !== 'tauri') return nativeCaptureScreen();
+    await nativeHideSelf();
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    try {
+      return await nativeCaptureScreen();
+    } finally {
+      await nativeShowSelf();
+    }
+  };
+
   const start = async (target: ToolMode) => {
     setLoading(true);
+    const singleFrame = target === 'snap' || target === 'ocr' || target === 'translate';
     try {
       if (isDesktop()) {
+        if (singleFrame && delay > 0) {
+          cancelCountdownRef.current = false;
+          for (let left = delay; left > 0; left -= 1) {
+            if (cancelCountdownRef.current) return;
+            setCountdown(left);
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          if (cancelCountdownRef.current) return;
+          setCountdown(null);
+        }
         if (target === 'scroll' || target === 'record') {
           // 长图与录屏要连续取帧，原生宿主开一个轮询帧源。
           const source = await openNativeSession();
@@ -109,7 +140,7 @@ export function CaptureWorkspace({
           setState({ kind: 'selecting', mode: target, frame, session: source });
         } else {
           // 单帧类（截图 / OCR / 翻译）抓一张就够，不轮询。
-          const frame = await nativeCaptureScreen();
+          const frame = await grabWithoutSelf();
           if (!frame) throw new Error('原生抓帧没有返回画面');
           setState({ kind: 'selecting', mode: target, frame, session: null });
         }
@@ -125,8 +156,22 @@ export function CaptureWorkspace({
       toast(message.includes('Permission') || message.includes('denied') ? '你取消了屏幕授权' : message, 'warn');
     } finally {
       setLoading(false);
+      setCountdown(null);
     }
   };
+
+  // 热键 / 快捷浮窗只送「哪一次」与模式：命中当前模式且还停在待机页时直接开拍。
+  const autoStartTick = autoStart?.tick ?? 0;
+  const lastTickRef = useRef(0);
+  useEffect(() => {
+    if (!autoStartTick || autoStartTick === lastTickRef.current) return;
+    lastTickRef.current = autoStartTick;
+    if (autoStart?.mode !== mode) return;
+    if (stateRef.current.kind !== 'idle') return;
+    void start(mode);
+    // start 依赖的 delay/settings 在热键场景下取当前值即可，不额外触发。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStartTick, mode]);
 
   const confirmRegion = (rect: Rect) => {
     if (state.kind !== 'selecting') return;
@@ -198,6 +243,31 @@ export function CaptureWorkspace({
       setLoading(false);
     }
   };
+
+  if (countdown !== null) {
+    return (
+      <div className="stage-grid flex min-h-0 flex-1 items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <span className="font-mono text-[11px] tracking-[0.3em] text-muted">倒计时结束后自动框选</span>
+          <div className="relative flex h-32 w-32 items-center justify-center border border-amber/40 bg-amber/5">
+            <span className="frame-corner -left-px -top-px border-l-2 border-t-2" />
+            <span className="frame-corner -right-px -bottom-px border-b-2 border-r-2" />
+            <span className="text-[64px] font-semibold leading-none text-amber">{countdown}</span>
+          </div>
+          <button
+            type="button"
+            className="btn !py-1.5 text-[12px]"
+            onClick={() => {
+              cancelCountdownRef.current = true;
+              setCountdown(null);
+            }}
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (state.kind === 'selecting') {
     return (
@@ -311,6 +381,26 @@ export function CaptureWorkspace({
               {loading ? '正在请求屏幕授权' : '开始捕捉'}
               <ArrowRight size={15} />
             </button>
+            {mode === 'snap' || mode === 'ocr' || mode === 'translate' ? (
+              <div className="flex items-center gap-1.5">
+                <Timer size={13} className="text-muted" />
+                {( [0, 3, 5] as const).map((seconds) => (
+                  <button
+                    key={seconds}
+                    type="button"
+                    className={`border px-2 py-1 font-mono text-[11px] transition-colors ${
+                      delay === seconds
+                        ? 'border-amber/60 bg-amber/10 text-amber'
+                        : 'border-ink-600/60 text-muted hover:border-ink-500 hover:text-paper/80'
+                    }`}
+                    onClick={() => setDelay(seconds)}
+                    title={seconds === 0 ? '立即取帧' : `等 ${seconds} 秒再取帧，留时间展开菜单/右键`}
+                  >
+                    {seconds === 0 ? '立即' : `${seconds}s`}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <span className="font-mono text-[10px] tracking-wider text-muted">
               {host === 'web'
                 ? '网页端每次需浏览器授权 · 桌面端无此步骤'
@@ -319,6 +409,9 @@ export function CaptureWorkspace({
                   : '桌面壳直接调用系统截屏 · 无需授权'}
             </span>
           </div>
+          <p className="mt-2 font-mono text-[10px] tracking-wider text-muted/70">
+            {host === 'tauri' ? 'Ctrl+Alt+Q 呼出快捷浮窗 · Ctrl+Alt+S / C / R / O / F 直接进入对应模式' : ''}
+          </p>
 
           <div className="mt-8 sprocket opacity-30" />
 

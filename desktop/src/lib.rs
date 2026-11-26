@@ -15,6 +15,15 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+/// GUI 子系统没有控制台，eprintln 看不见；把关键诊断落到临时目录，方便现场排查。
+fn log_line(message: &str) {
+    use std::io::Write;
+    let path = std::path::PathBuf::from("C:\\Users\\35342\\AppData\\Local\\Temp\\stillframe-boot.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{message}");
+    }
+}
+
 fn decode_data_url(data: &str) -> Result<Vec<u8>, String> {
     let (_, payload) = data
         .split_once(',')
@@ -178,6 +187,15 @@ mod tests {
     fn sanitizes_windows_forbidden_chars() {
         assert_eq!(sanitize_file_name("a:b*c?.png"), "a_b_c_.png");
     }
+
+    #[test]
+    fn clamps_wheel_notches() {
+        assert_eq!(wheel_delta(3), 360);
+        assert_eq!(wheel_delta(-2), -240);
+        assert_eq!(wheel_delta(99), 20 * WHEEL_DELTA);
+        assert_eq!(wheel_delta(-99), -20 * WHEEL_DELTA);
+        assert_eq!(wheel_delta(0), 0);
+    }
 }
 
 /// 弹系统保存框，写 PNG。用户取消返回 None。
@@ -249,6 +267,155 @@ fn show_self(window: tauri::WebviewWindow) -> Result<(), String> {
     window.set_focus().map_err(err)
 }
 
+/// 一档滚轮的 delta 值（Windows 的 WHEEL_DELTA）。
+const WHEEL_DELTA: i32 = 120;
+
+/// 把界面传来的「档数」折算成 SendInput 需要的 delta，并夹在 ±20 档内，
+/// 避免一次注入把目标窗口甩出太远、重叠区不够。
+fn wheel_delta(notches: i32) -> i32 {
+    notches.clamp(-20, 20) * WHEEL_DELTA
+}
+
+/// 向指定屏幕坐标注入滚轮事件（长截图自动滚动用）。
+///
+/// 只发竖向滚轮：横向自动滚动目标窗口命中率低，仍走手动追加。
+/// 注入前把光标挪到目标点，注入后立刻挪回原处，避免抢用户的鼠标。
+#[tauri::command]
+fn scroll_at(x: i32, y: i32, notches: i32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetCursorPos};
+
+        let mut origin = POINT::default();
+        unsafe { GetCursorPos(&mut origin) }.map_err(err)?;
+
+        unsafe { SetCursorPos(x, y) }.map_err(err)?;
+        let wheel = MOUSEINPUT {
+            dx: 0,
+            dy: 0,
+            mouseData: wheel_delta(notches) as u32,
+            dwFlags: MOUSEEVENTF_WHEEL,
+            time: 0,
+            dwExtraInfo: 0,
+        };
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 { mi: wheel },
+        };
+        let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
+        // 先复位光标，再汇报结果：即使注入失败也不能把鼠标留在原地。
+        unsafe { SetCursorPos(origin.x, origin.y) }.map_err(err)?;
+        if sent == 0 {
+            return Err("滚轮事件没有送达目标窗口".to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (x, y, notches);
+        Err("自动滚动目前只在 Windows 桌面壳实现".to_string())
+    }
+}
+
+/// 快捷浮窗：无边框、置顶、不进任务栏的一条动作栏。
+/// 位置贴主屏底部居中，和 QQ 的截图浮条一样随叫随到，再点「收起」隐藏。
+fn show_quick(app: &AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("quick") {
+        window.show().map_err(err)?;
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    let width = 520.0_f64;
+    let height = 84.0_f64;
+    let builder = WebviewWindowBuilder::new(app, "quick", WebviewUrl::App("quick.html".into()))
+        .title("Stillframe 快捷浮窗")
+        .inner_size(width, height)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .visible(true);
+    let window = builder.build().map_err(|error| {
+        log_line(&format!("[quick] 创建窗口失败：{error}"));
+        err(error)
+    })?;
+    log_line("[quick] 窗口已创建");
+
+    if let Ok(Some(monitor)) = window.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let area = monitor.size();
+        let origin = monitor.position();
+        let x = origin.x + (area.width as f64 - width * scale) as i32 / 2;
+        let y = origin.y + (area.height as f64 - height * scale) as i32 - (28.0 * scale) as i32;
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+fn open_quick(app: AppHandle) -> Result<(), String> {
+    show_quick(&app)
+}
+
+#[tauri::command]
+fn close_quick(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("quick") {
+        window.hide().map_err(err)?;
+    }
+    Ok(())
+}
+
+fn toggle_quick(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("quick") {
+        if window.is_visible().unwrap_or(false) {
+            let _ = window.hide();
+            return;
+        }
+    }
+    if let Err(error) = show_quick(app) {
+        log_line(&format!("[quick] 打开失败：{error}"));
+        eprintln!("[stillframe] 快捷浮窗打开失败：{error}");
+    }
+}
+
+/// 浮窗里选了一个动作：收起浮窗、亮出主窗，并让前端直接进入该模式的捕捉。
+#[tauri::command]
+fn quick_action(app: AppHandle, mode: String) -> Result<(), String> {
+    log_line(&format!("[quick] action={mode}"));
+    if let Some(window) = app.get_webview_window("quick") {
+        let _ = window.hide();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
+    app.emit_to("main", "stillframe://quick", mode)
+        .map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn quick_main(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("quick") {
+        let _ = window.hide();
+    }
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.unminimize();
+        let _ = main.set_focus();
+    }
+    Ok(())
+}
+
 fn shortcuts() -> Vec<(Shortcut, &'static str)> {
     vec![
         (
@@ -276,6 +443,9 @@ fn shortcuts() -> Vec<(Shortcut, &'static str)> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // --quick：只把快捷浮窗叫出来（可配合开机自启，日常不用展开主窗）。
+    let start_quick = std::env::args().any(|arg| arg == "--quick");
+    log_line(&format!("[boot] run start_quick={start_quick}"));
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -287,9 +457,14 @@ pub fn run() {
             write_shot,
             list_windows,
             hide_self,
-            show_self
+            show_self,
+            scroll_at,
+            open_quick,
+            close_quick,
+            quick_action,
+            quick_main
         ])
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -306,8 +481,31 @@ pub fn run() {
                         eprintln!("[stillframe] 快捷键 {mode} 注册失败：{err}");
                     }
                 }
+
+                // Ctrl+Alt+Q 只负责叫出/收起快捷浮窗：作为主窗最小化时的常驻入口。
+                let quick_handle = app.handle().clone();
+                let quick_shortcut =
+                    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyQ);
+                let quick_result = app.global_shortcut().on_shortcut(
+                    quick_shortcut,
+                    move |_app, _shortcut, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            toggle_quick(&quick_handle);
+                        }
+                    },
+                );
+                if let Err(err) = quick_result {
+                    eprintln!("[stillframe] 快捷键 quick 注册失败：{err}");
+                }
             }
             let _ = app.get_webview_window("main");
+            log_line(&format!("[boot] start_quick={start_quick}"));
+            if start_quick {
+                if let Err(error) = show_quick(app.handle()) {
+                    log_line(&format!("[quick] --quick 启动失败：{error}"));
+                    eprintln!("[stillframe] --quick 启动失败：{error}");
+                }
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

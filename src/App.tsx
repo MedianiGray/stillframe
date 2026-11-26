@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Rail } from './components/Rail';
 import { TopBar } from './components/TopBar';
 import { CaptureWorkspace } from './components/CaptureWorkspace';
@@ -6,7 +6,7 @@ import { LibraryView } from './components/LibraryView';
 import { SettingsView } from './components/SettingsView';
 import { PinLayer, type PinItem } from './components/PinLayer';
 import { loadSettings, saveSettings } from './lib/settings';
-import { nativePin } from './lib/desktop';
+import { hostKind, nativeOpenQuick, nativePin, onHostEvent } from './lib/desktop';
 import { QQ_TEXT } from './lib/qqspec';
 import { useToast } from './components/Toasts';
 import type { Settings } from './lib/settings';
@@ -29,8 +29,38 @@ export default function App() {
   const [settings, setSettings] = useState<Settings>(() => loadSettings());
   const [pins, setPins] = useState<PinItem[]>([]);
   const [libraryKey, setLibraryKey] = useState(0);
+  const [autoStart, setAutoStart] = useState<{ mode: ToolMode; tick: number }>({ mode: 'snap', tick: 0 });
 
   const bumpLibrary = () => setLibraryKey((n) => n + 1);
+
+  // 桌面壳的全局热键与快捷浮窗都通过事件唤前端：切到对应模式，直接开拍。
+  useEffect(() => {
+    let disposed = false;
+    const offs: Array<() => void> = [];
+
+    const handle = (mode: string) => {
+      if (!['snap', 'scroll', 'record', 'ocr', 'translate'].includes(mode)) return;
+      setView('capture');
+      setMode(mode as ToolMode);
+      setAutoStart((prev) => ({ mode: mode as ToolMode, tick: prev.tick + 1 }));
+    };
+
+    void Promise.all([
+      onHostEvent('stillframe://shortcut', handle),
+      onHostEvent('stillframe://quick', handle),
+    ]).then((results) => {
+      results.forEach((off) => {
+        if (!off) return;
+        if (disposed) off();
+        else offs.push(off);
+      });
+    });
+
+    return () => {
+      disposed = true;
+      offs.forEach((off) => off());
+    };
+  }, []);
 
   const header =
     view === 'capture'
@@ -47,6 +77,7 @@ export default function App() {
         onMode={(next) => setMode(next)}
         onView={(next) => setView(next)}
         busy={false}
+        onQuick={hostKind() === 'tauri' ? () => void nativeOpenQuick() : undefined}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -59,6 +90,7 @@ export default function App() {
               mode={mode}
               settings={settings}
               onMode={(next) => setMode(next)}
+              autoStart={autoStart}
               onOpenSettings={() => setView('settings')}
               onPin={async (dataUrl, width, height) => {
                 try {

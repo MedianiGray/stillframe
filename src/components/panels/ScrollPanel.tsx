@@ -16,6 +16,8 @@ import type { Rect } from '../../lib/types';
 import type { ScreenSession } from '../../lib/capture';
 import { grabRegion } from '../../lib/capture';
 import { stitchHorizontal, stitchVertical } from '../../lib/stitch';
+import { judgeScroll, sampledDifference, wheelNotches, type ScrollSample } from '../../lib/autoscroll';
+import { hostKind, nativeScroll } from '../../lib/desktop';
 import { canvasToBlob, copyBlobToClipboard, downloadBlob, timestampName } from '../../lib/image';
 import { QQ_TEXT } from '../../lib/qqspec';
 import { useToast } from '../Toasts';
@@ -43,6 +45,8 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
   const [showManual, setShowManual] = useState(false);
   const [busy, setBusy] = useState(false);
   const holderRef = useRef<HTMLDivElement | null>(null);
+  const resultRef = useRef(seed);
+  const runningRef = useRef(false);
 
   useEffect(() => {
     const holder = holderRef.current;
@@ -53,6 +57,20 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
     result.style.height = 'auto';
   }, [result]);
 
+  // 卸载时别把自动滚动留在后台继续注入滚轮。
+  useEffect(() => {
+    return () => {
+      runningRef.current = false;
+    };
+  }, []);
+
+  const applyStitched = (canvas: HTMLCanvasElement, overlap: number) => {
+    resultRef.current = canvas;
+    setResult(canvas);
+    setFrames((n) => n + 1);
+    setLastOverlap(overlap);
+  };
+
   const append = () => {
     if (busy) return;
     setBusy(true);
@@ -60,10 +78,8 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
       const next = grabRegion(session.video, rect);
       const manual = manualOverlap.trim() ? Number(manualOverlap) : undefined;
       const stitch = direction === 'v' ? stitchVertical : stitchHorizontal;
-      const stitched = stitch(result, next, { autoDetect: manual === undefined, overlap: manual });
-      setResult(stitched.canvas);
-      setFrames((n) => n + 1);
-      setLastOverlap(stitched.overlap);
+      const stitched = stitch(resultRef.current, next, { autoDetect: manual === undefined, overlap: manual });
+      applyStitched(stitched.canvas, stitched.overlap);
       if (manual === undefined && stitched.overlap === 0) {
         toast('没找到重叠区，按无重叠直接接上了，可用手动重叠再试', 'warn');
       } else {
@@ -76,7 +92,65 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
     }
   };
 
+  /** 隐藏自身 → 注入滚轮 → 抓帧拼接 → 判定，直到到底或该回退手动。 */
+  const runAuto = async () => {
+    if (busy || runningRef.current) return;
+    if (hostKind() !== 'tauri') {
+      toast('自动滚动需要向目标窗口发送滚轮事件，仅桌面壳支持；网页端请手动滚动后点追加', 'warn');
+      return;
+    }
+    if (direction !== 'v') {
+      toast('自动滚动目前只做竖向，横向请手动滚动后点追加', 'warn');
+      return;
+    }
+
+    runningRef.current = true;
+    setAutoScroll(true);
+    setBusy(true);
+    const notches = wheelNotches(rect.h);
+    let base = resultRef.current;
+    let lastFrame = grabRegion(session.video, rect);
+    const samples: ScrollSample[] = [];
+    try {
+      for (let frame = 0; frame < 30 && runningRef.current; frame += 1) {
+        await nativeScroll(rect.x + rect.w / 2, rect.y + rect.h / 2, notches);
+        // 原生会话 320ms 抓一次帧，等它刷新并让目标窗口滚稳。
+        await new Promise((r) => setTimeout(r, 620));
+        const next = grabRegion(session.video, rect);
+        const stitched = stitchVertical(base, next);
+        samples.push({ overlap: stitched.overlap, difference: sampledDifference(lastFrame, next) });
+        if (stitched.overlap > 0 && stitched.canvas.height > base.height) {
+          base = stitched.canvas;
+          applyStitched(base, stitched.overlap);
+        }
+        lastFrame = next;
+
+        const verdict = judgeScroll(samples);
+        if (verdict === 'end') {
+          toast(`已滚到底，共 ${samples.length} 屏，自动滚动结束`, 'ok');
+          break;
+        }
+        if (verdict === 'fallback') {
+          setShowManual(true);
+          toast('滚过去没找到重叠区，已停下：请手动滚动一屏并填写重叠像素', 'warn');
+          break;
+        }
+      }
+    } catch (error) {
+      setShowManual(true);
+      toast(
+        `${error instanceof Error ? error.message : '自动滚动失败'}；已切换为手动追加，滚动后点加号即可`,
+        'warn',
+      );
+    } finally {
+      runningRef.current = false;
+      setAutoScroll(false);
+      setBusy(false);
+    }
+  };
+
   const reset = () => {
+    resultRef.current = seed;
     setResult(seed);
     setFrames(1);
     setLastOverlap(null);
@@ -137,15 +211,10 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
           </button>
           <button
             type="button"
-            title={autoScroll ? '停止自动滚动（桌面壳）' : '自动滚动（桌面壳，网页端不可用）'}
+            title={autoScroll ? '正在自动滚动' : '自动滚动（桌面壳，网页端不可用）'}
             className={`${BTN} ${autoScroll ? BTN_ON : ''}`}
-            onClick={() => {
-              if (autoScroll) {
-                setAutoScroll(false);
-                return;
-              }
-              toast('自动滚动需要向目标窗口发送滚轮事件，仅桌面壳支持；网页端请手动滚动后点追加', 'warn');
-            }}
+            disabled={busy}
+            onClick={() => void runAuto()}
           >
             <Layers size={16} strokeWidth={1.7} />
           </button>

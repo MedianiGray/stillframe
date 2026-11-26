@@ -48,7 +48,12 @@ cargo tauri icon icons/icon.png
 | `write_shot` | 静默写入 `%USERPROFILE%\Pictures\Stillframe`，命名 `stillframe-YYYYMMDD-HHMMSS.png`，不弹框 |
 | `list_windows` | 遍历可见窗口，返回 `{id, title, app, width, height}` |
 | `hide_self` / `show_self` | 截图前收起 / 拍完恢复，对应 QQ 截图里的「隐藏当前窗口」 |
-| 全局快捷键 | `Ctrl+Alt+S/R/C/O/F`，触发后向前端发 `stillframe://shortcut` 事件 |
+| `open_quick` / `close_quick` | 打开 / 收起快捷浮窗（`quick.html`，无边框、置顶、不进任务栏、贴主屏底部居中） |
+| `quick_action` / `quick_main` | 浮窗里的动作：收起自己、亮出主窗并广播 `stillframe://quick`，前端据此直接开拍 / 回主窗 |
+| `scroll_at` | 向屏幕坐标注入滚轮（Windows `SendInput`，用完立刻把光标放回原处），长截图自动滚动用 |
+| 全局快捷键 | `Ctrl+Alt+S/R/C/O/F` 进入对应模式、`Ctrl+Alt+Q` 呼出浮窗，触发后向前端发 `stillframe://shortcut` / 浮窗直发 `stillframe://quick` |
+
+启动参数 `--quick`：只把快捷浮窗叫出来，适合放进开机启动项，日常不用展开主窗。
 
 ## 权限声明
 

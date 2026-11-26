@@ -1,0 +1,35 @@
+# 实训室网页版 + 预热。用法在仓库根目录：
+#   docker compose -f deploy/docker-compose.yml up -d --build
+#   docker compose -f deploy/docker-compose.yml stop     # 平时关掉，不占内存
+# 桌面壳是另一个分发渠道（安装包），不通过这里下发。
+name: stillframe-lab
+
+services:
+  stillframe-web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        NPM_REGISTRY: https://registry.npmmirror.com
+        TESSDATA_BASE: https://tessdata.projectnaptha.com/4.0.0
+    image: stillframe-web:lab
+    container_name: stillframe-web
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # 只读根文件系统 + nginx 临时目录走 tmpfs，学生机改不了站点内容。
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run

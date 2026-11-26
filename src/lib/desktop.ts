@@ -21,6 +21,7 @@ interface AndroidBridgeLike {
   pinImage?: (dataUrl: string) => void;
   savePng?: (dataUrl: string, suggestedName: string) => string;
   hideSelf?: () => void;
+  showSelf?: () => void;
   requestScreenCapture?: () => void;
   requestOverlayPermission?: () => void;
 }
@@ -153,4 +154,65 @@ export async function nativeHideSelf(): Promise<void> {
   }
   const invoke = desktopInvoke();
   if (invoke) await invoke('hide_self');
+}
+
+/** 恢复自身窗口（自动滚动结束时一定要调用）。 */
+export async function nativeShowSelf(): Promise<void> {
+  const bridge = androidBridge();
+  if (bridge?.showSelf) {
+    bridge.showSelf();
+    return;
+  }
+  const invoke = desktopInvoke();
+  if (invoke) await invoke('show_self');
+}
+
+/**
+ * 向屏幕坐标注入滚轮事件（自动滚动长截图）。notches 为「档」数，正数向下。
+ * 非 Windows 桌面壳会抛错，调用方据此回退手动模式。
+ */
+export async function nativeScroll(x: number, y: number, notches: number): Promise<void> {
+  const invoke = desktopInvoke();
+  if (!invoke) throw new Error('自动滚动需要桌面壳');
+  await invoke('scroll_at', { x: Math.round(x), y: Math.round(y), notches });
+}
+
+/** 打开快捷浮窗（桌面壳）。浏览器没有这个能力。 */
+export async function nativeOpenQuick(): Promise<boolean> {
+  const invoke = desktopInvoke();
+  if (!invoke) return false;
+  await invoke('open_quick');
+  return true;
+}
+
+interface TauriInternals extends TauriGlobal {
+  __TAURI_INTERNALS__?: {
+    invoke?: Invoke;
+    transformCallback?: (callback: (payload: unknown) => void, once?: boolean) => number;
+  };
+}
+
+/**
+ * 监听桌面壳发来的事件（热键、浮窗动作）。不引入 @tauri-apps/api，
+ * 直接走 Tauri 2 的 event 插件与内部 transformCallback，保持零运行时依赖。
+ * 返回取消监听的函数；浏览器环境返回 null。
+ */
+export async function onHostEvent(
+  event: string,
+  handler: (payload: string) => void,
+): Promise<(() => void) | null> {
+  if (typeof window === 'undefined') return null;
+  const internals = (window as unknown as TauriInternals).__TAURI_INTERNALS__;
+  if (!internals?.invoke || typeof internals.transformCallback !== 'function') return null;
+
+  const id = internals.transformCallback((payload) => handler(String(payload ?? '')));
+  await internals.invoke('plugin:event|listen', {
+    event,
+    target: { kind: 'WebviewWindow', label: 'main' },
+    handler: id,
+  });
+
+  return () => {
+    void internals.invoke?.('plugin:event|unlisten', { event, eventId: id });
+  };
 }

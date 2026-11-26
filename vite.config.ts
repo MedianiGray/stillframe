@@ -20,5 +20,12 @@ export default defineConfig({
   build: {
     target: 'es2020',
     sourcemap: false,
+    rollupOptions: {
+      // 主界面 + 桌面壳的快捷浮窗各自是独立页面，共用一份样式约定但互不加载 React。
+      input: {
+        main: 'index.html',
+        quick: 'quick.html',
+      },
+    },
   },
 });

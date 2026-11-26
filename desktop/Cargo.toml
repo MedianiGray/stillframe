@@ -26,6 +26,13 @@ png = "0.17"
 # 只需同步调整此处的版本号与 list_windows 里 title()/id() 的返回值处理。
 xcap = "0.4"
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [profile.release]
 codegen-units = 1
 lto = true

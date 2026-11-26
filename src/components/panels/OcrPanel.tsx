@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, ScanText, Save, X } from 'lucide-react';
 import type { Settings } from '../../lib/settings';
 import { recognize } from '../../lib/ocr';
@@ -30,10 +30,13 @@ export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const autoRanRef = useRef(false);
   const preview = useMemo(() => image.toDataURL('image/png'), [image]);
 
   const run = async () => {
     setBusy(true);
+    setError('');
     setProgress(0);
     setStatus('准备语言包');
     try {
@@ -50,12 +53,23 @@ export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
       setConfidence(result.confidence);
       toast(result.text ? `识别完成 · ${result.paragraphs.length} 段` : '没有识别到文字', result.text ? 'ok' : 'warn');
     } catch (error) {
-      toast(error instanceof Error ? error.message : '识别失败，可能是语言包下载失败', 'warn');
+      const message = error instanceof Error ? error.message : '识别失败，可能是语言包下载失败';
+      setError(message);
+      toast(message, 'warn');
     } finally {
       setBusy(false);
       setStatus('');
     }
   };
+
+  // 系统截图的取字是「框完立刻出字」，不该再让用户点一次识别：进面板即自动跑一次。
+  useEffect(() => {
+    if (autoRanRef.current) return;
+    autoRanRef.current = true;
+    void run();
+    // 仅首帧自动识别，换语言由用户点「识别」触发。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const copy = async () => {
     try {
@@ -125,6 +139,17 @@ export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
           ) : null}
           {confidence !== null ? (
             <p className="mt-2 font-mono text-[10px] text-muted">置信度 {confidence.toFixed(1)}</p>
+          ) : null}
+          {error ? (
+            <div className="mt-2 border-l-2 border-signal-warn/60 bg-ink-850 px-2 py-1.5">
+              <p className="text-[11px] leading-4 text-signal-warn/90">{error}</p>
+              <p className="mt-1 text-[10.5px] leading-4 text-muted">
+                语言包只在第一次识别时下载，之后走本地缓存。离线或内网环境可在设置里填内网 language-data 目录。
+              </p>
+              <button type="button" className="mt-1.5 text-[11px] text-amber hover:underline" onClick={() => void run()}>
+                重试识别
+              </button>
+            </div>
           ) : null}
         </div>
 
@@ -197,6 +222,22 @@ export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
               <Save size={14} /> 存图库
             </button>
           </div>
+          <button
+            type="button"
+            className="btn btn-accent mt-2 w-full"
+            disabled={!text}
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(text);
+                toast('已复制，已收起取字台', 'ok');
+                onClose();
+              } catch {
+                toast('复制失败，请手动选中', 'warn');
+              }
+            }}
+          >
+            复制并收起
+          </button>
           <button type="button" className="btn btn-ghost mt-2 w-full" onClick={onClose}>
             <X size={14} /> 返回捕捉台
           </button>

@@ -2,6 +2,7 @@ import {
   Crop,
   Images,
   Languages,
+  PanelTop,
   ScanText,
   ScrollText,
   Settings as SettingsIcon,
@@ -15,6 +16,8 @@ interface RailProps {
   onMode: (mode: ToolMode) => void;
   onView: (view: ViewId) => void;
   busy: boolean;
+  /** 桌面壳：把常驻的快捷浮窗叫出来；浏览器端不显示。 */
+  onQuick?: () => void;
 }
 
 const MODES: Array<{ id: ToolMode; label: string; hint: string; icon: typeof Crop }> = [
@@ -25,7 +28,7 @@ const MODES: Array<{ id: ToolMode; label: string; hint: string; icon: typeof Cro
   { id: 'translate', label: '译屏', hint: '取字后翻译', icon: Languages },
 ];
 
-export function Rail({ view, mode, onMode, onView, busy }: RailProps) {
+export function Rail({ view, mode, onMode, onView, busy, onQuick }: RailProps) {
   return (
     <aside className="flex w-[56px] shrink-0 flex-col items-center border-r border-ink-600/50 bg-ink-900 py-3">
       <div className="mb-4 flex h-9 w-9 items-center justify-center border border-amber/40 bg-amber/10">
@@ -63,6 +66,17 @@ export function Rail({ view, mode, onMode, onView, busy }: RailProps) {
         >
           <Images size={17} strokeWidth={1.7} />
         </button>
+        {onQuick ? (
+          <button
+            type="button"
+            title="快捷浮窗 · 底部动作条（Ctrl+Alt+Q）"
+            aria-label="快捷浮窗"
+            className="rail-btn"
+            onClick={onQuick}
+          >
+            <PanelTop size={17} strokeWidth={1.7} />
+          </button>
+        ) : null}
         <button
           type="button"
           title="设置"
