@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Languages, ScanText, Save, X } from 'lucide-react';
 import type { Settings } from '../../lib/settings';
 import { recognize, toOcrBlob } from '../../lib/ocr';
+import { detectContent } from '../../lib/intent';
 import { hostKind, nativeTessdata } from '../../lib/desktop';
 import { makeThumbnail } from '../../lib/image';
 import { putShot } from '../../lib/storage';
@@ -45,6 +46,8 @@ export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: Ocr
   const [error, setError] = useState('');
   const autoRanRef = useRef(false);
   const preview = useMemo(() => image.toDataURL('image/png'), [image]);
+  // 识别结果一出来就说清楚「这是什么」，并预选一个动作；判读随编辑实时更新。
+  const read = useMemo(() => detectContent(text), [text]);
 
   const run = async () => {
     setBusy(true);
@@ -116,6 +119,20 @@ export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: Ocr
     } catch {
       toast('存入图库失败', 'warn');
     }
+  };
+
+  const applySuggested = () => {
+    if (!read) return;
+    if (read.suggest === 'translate' && onTranslate) {
+      onTranslate();
+      return;
+    }
+    // 没有译屏入口时退回复制，别让按钮点了像坏了。
+    if (read.suggest === 'keep') {
+      void save();
+      return;
+    }
+    void copy();
   };
 
   return (
@@ -195,6 +212,25 @@ export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: Ocr
               </div>
             ) : null}
           </div>
+
+          {read ? (
+            <div className="mt-2 flex items-center gap-2 border-l-2 border-amber/50 bg-ink-850 px-2 py-1.5">
+              <span className="shrink-0 font-mono text-[9.5px] uppercase tracking-wider text-muted/60">
+                检测到
+              </span>
+              <span className="min-w-0 flex-1 truncate text-[11.5px] text-paper/85" title={read.summary}>
+                {read.summary}
+              </span>
+              <button
+                type="button"
+                className="shrink-0 font-mono text-[10px] text-amber hover:underline"
+                onClick={applySuggested}
+                title="只是建议，点不点由你决定"
+              >
+                按建议{read.actionLabel}
+              </button>
+            </div>
+          ) : null}
 
           {viewMode === 'para' && paragraphs.length > 0 ? (
             <div className="mt-2 min-h-[200px] flex-1 space-y-1.5 overflow-auto border border-ink-600/40 bg-ink-950 p-2">
