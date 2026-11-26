@@ -17,6 +17,13 @@
 
 - stitch 单测（需要 canvas 环境，计划引入 jsdom + node-canvas 或改用纯函数签名）
 
+### 桌面壳真机验收（v0.2 第一批收口）
+
+- **能编译、能跑**：补齐 `desktop/icons/icon.ico`、去掉 tauri 的 `protocol-asset` 特性（前端未用 `convertFileSrc`），按 xcap 0.4 的 `window.id()` 返回 `Result` 改写调用；Windows 下用 VS Build Tools 2022 + stable-msvc 工具链，低内存机器（7.4GB）用 `-j 1` 加 `codegen-units=1` 编译通过。
+- **热键容错**：setup 里逐条注册 Ctrl+Alt+S/R/C/O/F，被别的截图工具占用时只打警告、不再让壳起不来。
+- **静默落盘验收**：新增 `write_shot` 的 3 条 Rust 单测（临时目录连写 10 张、坏 data URL 报错、非法字符清洗）全通过；真机开「导出时静默写入 图片\Stillframe」后连续 10 次截图保存，全部落到 `%USERPROFILE%\Pictures\Stillframe`，命名 `stillframe-YYYYMMDD-HHMMSS.png`，全程无系统「另存为」弹窗；关掉该开关则回到「另存为」对话框。
+- **保存语义对齐 QQ**：`Editor.persist()` 只写图库，`handleSave()` 按 `autoSaveEnabled` 选自动/手动；设置页在桌面端隐藏「选择自动保存目录」按钮，文案改为桌面直写 `图片\Stillframe`，不再提示浏览器授权。
+
 ## v0.1 初始开源版
 
 QQ 9.9.38 截图模块的界面与交互对标：框选、标注、12 色板、12 滤镜、长截图、录屏、识图、翻译、贴图，三端（网页 / Tauri 桌面 / Android WebView）。

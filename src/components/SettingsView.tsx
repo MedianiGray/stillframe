@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { FolderOpen, Save, Trash2 } from 'lucide-react';
 import type { Settings, TranslateProvider } from '../lib/settings';
 import { autosaveSupported, chooseDirectory, clearDirectory, currentDirectoryName } from '../lib/autosave';
+import { isDesktop } from '../lib/desktop';
 import { useToast } from './Toasts';
 
 interface SettingsViewProps {
@@ -185,9 +186,11 @@ export function SettingsView({ settings, onSave }: SettingsViewProps) {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-ink-600 pt-3">
-            <button type="button" className="btn" onClick={pickDirectory} disabled={!autosaveSupported()}>
-              <FolderOpen size={14} /> 选择自动保存目录
-            </button>
+            {isDesktop() ? null : (
+              <button type="button" className="btn" onClick={pickDirectory} disabled={!autosaveSupported()}>
+                <FolderOpen size={14} /> 选择自动保存目录
+              </button>
+            )}
             {dirName ? (
               <button
                 type="button"
@@ -208,11 +211,13 @@ export function SettingsView({ settings, onSave }: SettingsViewProps) {
                 checked={draft.autoSaveEnabled}
                 onChange={(event) => patch('autoSaveEnabled', event.target.checked)}
               />
-              导出时写入该目录
+              {isDesktop() ? '导出时静默写入 图片\\Stillframe' : '导出时写入该目录'}
             </label>
           </div>
           <p className="mt-2 text-[11px] leading-5 text-muted">
-            浏览器重启后目录授权会失效，需要重新选择一次。不支持该接口的浏览器请直接用下载。
+            {isDesktop()
+              ? '桌面端直接写入系统「图片\\Stillframe」目录，每次保存追加一张，不弹系统保存框；关掉上面这项则改走「另存为」。'
+              : '浏览器重启后目录授权会失效，需要重新选择一次。不支持该接口的浏览器请直接用下载。'}
           </p>
         </section>
 

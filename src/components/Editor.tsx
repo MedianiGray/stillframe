@@ -192,6 +192,7 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
     return out;
   }, [annotations, base, image]);
 
+  /** 只负责入图库；是否落盘由 handleSave 按「自动保存」开关决定。 */
   const persist = useCallback(
     async (blob: Blob, filename: string) => {
       await putShot({
@@ -204,15 +205,9 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
         blob,
         thumb: makeThumbnail(base, 240),
       });
-      if (settings.autoSaveEnabled) {
-        const result = await saveBlob(blob, filename, 'auto');
-        if (!result.ok && result.via !== 'canceled') {
-          toast(`${describeSave(result)}，已只存入图库`, 'warn');
-        }
-      }
       onSaved();
     },
-    [base, image, onSaved, settings.autoSaveEnabled, toast],
+    [base, image, onSaved],
   );
 
   const copyOut = useCallback(async () => {
@@ -240,7 +235,9 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
       const ext = format === 'jpeg' ? 'jpg' : 'png';
       const filename = timestampName('stillframe', ext);
       const blob = await canvasToBlob(compose(), format, settings.jpegQuality);
-      const result = await saveBlob(blob, filename, 'manual');
+      // 自动保存开关就是 QQ 的「自动保存」：桌面端直接静默落盘，不弹系统对话框。
+      const mode = settings.autoSaveEnabled ? 'auto' : 'manual';
+      const result = await saveBlob(blob, filename, mode);
       if (result.via !== 'canceled') await persist(blob, filename);
       toast(result.ok ? `${describeSave(result)} · 已存入图库` : describeSave(result), result.ok ? 'ok' : 'warn');
     } catch (error) {

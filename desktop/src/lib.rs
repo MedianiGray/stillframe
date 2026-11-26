@@ -118,21 +118,66 @@ fn sanitize_file_name(name: &str) -> String {
 #[tauri::command]
 async fn write_shot(data_url: String, suggested_name: String) -> Result<String, String> {
     let bytes = decode_data_url(&data_url)?;
+    let target = write_png_bytes(&bytes, &shot_dir()?, &suggested_name)?;
+    Ok(target.to_string_lossy().to_string())
+}
+
+/// 桌面自动保存的固定目录：`%USERPROFILE%\Pictures\Stillframe`。
+fn shot_dir() -> Result<std::path::PathBuf, String> {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .map_err(|_| "找不到用户目录，无法静默保存".to_string())?;
-    let dir = std::path::PathBuf::from(home)
-        .join("Pictures")
-        .join("Stillframe");
-    std::fs::create_dir_all(&dir).map_err(err)?;
+    Ok(std::path::PathBuf::from(home).join("Pictures").join("Stillframe"))
+}
 
-    let mut name = sanitize_file_name(&suggested_name);
+/// 落盘本体，抽出来是为了能脱离窗口系统做连续保存测试。
+fn write_png_bytes(
+    bytes: &[u8],
+    dir: &std::path::Path,
+    suggested_name: &str,
+) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(err)?;
+    let mut name = sanitize_file_name(suggested_name);
     if !name.to_lowercase().ends_with(".png") {
         name.push_str(".png");
     }
     let target = dir.join(name);
     std::fs::write(&target, bytes).map_err(err)?;
-    Ok(target.to_string_lossy().to_string())
+    Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writes_ten_shots_without_dialog() {
+        let dir = std::env::temp_dir().join(format!("stillframe-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data_url = "data:image/png;base64,aGVsbG8=";
+        let bytes = decode_data_url(data_url).expect("data URL 应能解码");
+
+        for index in 1..=10 {
+            let name = format!("stillframe-{index:02}");
+            let target = write_png_bytes(&bytes, &dir, &name).expect("第 N 张应落盘成功");
+            assert!(target.exists(), "文件应存在: {}", target.display());
+            assert_eq!(target.file_name().unwrap().to_string_lossy(), format!("{name}.png"));
+        }
+
+        let count = std::fs::read_dir(&dir).unwrap().count();
+        assert_eq!(count, 10, "应当正好写入 10 张，实际 {count}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_data_url_without_payload() {
+        assert!(decode_data_url("not-a-data-url").is_err());
+    }
+
+    #[test]
+    fn sanitizes_windows_forbidden_chars() {
+        assert_eq!(sanitize_file_name("a:b*c?.png"), "a_b_c_.png");
+    }
 }
 
 /// 弹系统保存框，写 PNG。用户取消返回 None。
@@ -181,7 +226,7 @@ fn list_windows() -> Result<Vec<WindowInfo>, String> {
             continue;
         }
         rows.push(WindowInfo {
-            id: window.id(),
+            id: window.id().unwrap_or(0),
             title,
             app: window.app_name().unwrap_or_default(),
             width: window.width().unwrap_or(0),
@@ -250,13 +295,16 @@ pub fn run() {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
                 for (shortcut, mode) in shortcuts() {
                     let handle = app.handle().clone();
-                    app.global_shortcut()
-                        .on_shortcut(shortcut, move |_app, _shortcut, event| {
-                            if event.state() == ShortcutState::Pressed {
-                                // 前端监听 "stillframe://shortcut" 决定是直接开拍还是先显示窗口。
-                                let _ = handle.emit("stillframe://shortcut", mode);
-                            }
-                        })?;
+                    // 快捷键可能被别的截图工具（QQ/微信）先注册：注册失败只提示，不让整个壳起不来。
+                    let result = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+                        if event.state() == ShortcutState::Pressed {
+                            // 前端监听 "stillframe://shortcut" 决定是直接开拍还是先显示窗口。
+                            let _ = handle.emit("stillframe://shortcut", mode);
+                        }
+                    });
+                    if let Err(err) = result {
+                        eprintln!("[stillframe] 快捷键 {mode} 注册失败：{err}");
+                    }
                 }
             }
             let _ = app.get_webview_window("main");
