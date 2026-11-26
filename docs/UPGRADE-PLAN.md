@@ -209,6 +209,7 @@
 - 其余关键修复：`timeBeginPeriod(1)`（Windows 默认定时器粒度 15.6ms 会把 `sleep(33ms)` 拉成 46ms）；落后节拍时重复帧补时间轴 + 收尾 `pad_to`，否则慢于目标帧率时成片会快放（修前实测 60 秒录成 47 秒）；`SelectObject` 句柄失效自动重建，锁屏 / 远程重连不再断录。
 - 回退链：DXGI 建不起来（旧卡 / 会话不支持 / 驱动拒绝）自动退 `BitBlt`，`h264_qsv` 不可用自动退 `libx264`，两条都在 `backend` 字段里可查（如 `gdi+libx264`）。
 - 仍未做：WASAPI 环回与麦克风混音、录屏标注进成片、FFmpeg sidecar 随包分发。
+- 旁证：本机 `tools/recorder-check`（CI 同款断言）跑通——`codec_name=h264 / 320x240 / nb_frames=90 / duration=3.000000`，说明编码链在改动后仍可脱离 GUI 复验。
 
 ### 4.3 v1.0 发布与治理
 
@@ -251,6 +252,11 @@
 问题：WebView 内的 MediaRecorder 只能输出 WebM，而桌面壳逐帧拉取屏幕的速率只有个位数，两者都不满足“可交付录像”。
 
 方案：抓帧线程以 30 帧为目标循环调用 xcap，写入三帧环形缓冲；编码进程由 FFmpeg sidecar 承担，rawvideo 格式从标准输入读入，libx264 veryfast、CRF 20，音频由 WASAPI 环回采集系统声、与麦克风在 48kHz 立体声下混合。首帧到达后才启动编码，避免片头空白；掉帧计数写入日志并在结束页展示实际帧率。标注层仍在 canvas 合成，保证箭头、文字与激光进入成片。
+
+> **实施修订（2026-11-27 录制第二批实际做法）**：抓帧不再用 xcap——`capture_image()` 真机 3.9fps，封装开销占大头。改为 `FrameGrabber`：优先 DXGI Desktop Duplication（6–9ms/帧），回退 BitBlt（25fps 量级）；编码先探测 `h264_qsv` 用核显，回退 libx264 ultrafast；不做「三帧环形缓冲」，改为按节拍直写管道 + 落后时重复帧补齐 + 收尾 `pad_to`，保证成片时长等于录制时长。实测见 §4.2「录制第二批」表。
+>
+> **音频现状（实测摸底，下一批动手）**：本机 `ffmpeg -f dshow -list_devices` 只暴露「麦克风阵列 (Synaptics SmartAudio HD)」，**没有「立体声混音 / Stereo Mix」端点**，所以系统声不能靠 dshow 直接采。分两步走：① 麦克风走 ffmpeg 第二个 dshow 输入（`-f dshow -i audio="…" -c:a aac`，改动小、先让"有声音"成立）；② 系统声用 Rust 侧 WASAPI loopback 采集（`IAudioClient` 环回 + `IAudioCaptureClient`，48kHz 立体声 f32），先落临时 WAV，停止后用 `-c:v copy -c:a aac -shortest` 封装进 MP4——比在录制中开第二条管道稳。注意远程会话下 loopback 可能采到静音，验收要在物理会话或本地播放状态下的机器上做。
+
 
 验收：1080p 连续 60 秒，实测帧率不低于 28，成片在系统播放器中正常播放，音画偏差小于 100 毫秒。
 
