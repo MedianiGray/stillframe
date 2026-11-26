@@ -272,8 +272,17 @@ export interface NativeRecordingStats {
   path: string;
   frames: number;
   seconds: number;
+  /** 内容更新率：为对齐时间轴补出来的重复帧不计入。 */
   fps: number;
   dropped: number;
+  /** 每帧写管道的平均毫秒数，远大于 grabAvgMs 说明编码端是瓶颈。 */
+  writeAvgMs?: number;
+  /** 每帧抓屏的平均毫秒数。 */
+  grabAvgMs?: number;
+  /** 为对齐时间轴重复写出的帧数。 */
+  repeats?: number;
+  /** 实际走的抓帧 + 编码组合，如 `dxgi+h264_qsv`。 */
+  backend?: string;
 }
 
 /**

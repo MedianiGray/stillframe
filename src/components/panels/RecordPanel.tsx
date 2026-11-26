@@ -300,8 +300,12 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
         setRecording(false);
         if (!stats) throw new Error('没有拿到录制结果');
         setNativeDone(stats);
-        const droppedNote = stats.dropped ? `，掉 ${stats.dropped} 帧` : '';
-        toast(`录制完成：${stats.seconds} 秒，实测 ${stats.fps} 帧/秒${droppedNote}`, stats.fps >= 24 ? 'ok' : 'warn');
+        const droppedNote = stats.dropped ? `，补 ${stats.dropped} 帧` : '';
+        const backendNote = stats.backend ? `（${stats.backend}）` : '';
+        toast(
+          `录制完成：${stats.seconds} 秒，内容 ${stats.fps} 帧/秒${droppedNote}${backendNote}`,
+          stats.fps >= 24 ? 'ok' : 'warn',
+        );
       } catch (error) {
         setNativeRecording(false);
         setRecording(false);
@@ -559,6 +563,11 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
           <span className="font-mono text-[11px] text-[#C7CDD3]">
             {nativeDone.seconds.toFixed(1)}s · {nativeDone.fps}fps · {nativeDone.frames} 帧
           </span>
+          {nativeDone.backend ? (
+            <span className="font-mono text-[10px] text-[#5FD3FF]/80" title="实际走的抓帧 + 编码组合">
+              {nativeDone.backend}
+            </span>
+          ) : null}
           <span className="max-w-[240px] truncate text-[11px] text-[#8A9199]" title={nativeDone.path}>
             {nativeDone.path}
           </span>

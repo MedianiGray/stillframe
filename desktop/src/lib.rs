@@ -13,6 +13,9 @@ use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
 mod recorder;
 
+#[cfg(windows)]
+mod win_capture;
+
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -573,15 +576,154 @@ fn recording_slot() -> &'static std::sync::Mutex<Option<Recording>> {
 
 /// 抓帧循环：先抓一帧量尺寸、顺便当首帧（首帧到了才启动编码，避免片头空白），
 /// 之后按目标间隔抓屏、裁剪、写进编码器。落后三帧以上就重设基准，不做追赶式狂抓。
+/// 挑编码器：能跑 h264_qsv 就用核显，把 CPU 留给抓帧；不行再回退 libx264。
+/// 探测方式真编一小段（640×360、5 帧），比查 -encoders 靠谱——编码器列表里有，
+/// 不代表这台机器的驱动能用。
+#[cfg(windows)]
+fn pick_encoder(ffmpeg: &str) -> &'static str {
+    let ok = std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=640x360:rate=5:duration=1",
+            "-c:v",
+            "h264_qsv",
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if ok {
+        "h264_qsv"
+    } else {
+        "libx264"
+    }
+}
+
+/// 按目标节奏走一拍。抓帧比节拍慢时，用同一帧补齐时间轴——
+/// 这样成片时长才等于真实录制时长，否则慢于目标帧率就会变成快放。
+fn pace_frame(
+    encoder: &mut recorder::Encoder,
+    frame: &[u8],
+    next: &mut std::time::Instant,
+    interval: Duration,
+    now: std::time::Instant,
+) -> Result<(), String> {
+    if *next > now {
+        std::thread::sleep(*next - now);
+        return Ok(());
+    }
+    // 落后了：补帧顶住时间轴。补帧本身也要耗时，所以每补一帧重读一次时钟。
+    let mut filled = 0u8;
+    loop {
+        let probe = std::time::Instant::now();
+        if *next + interval > probe || filled >= 8 {
+            break;
+        }
+        encoder.push_repeat(frame)?;
+        *next += interval;
+        filled += 1;
+    }
+    let after = std::time::Instant::now();
+    if after > *next && after.duration_since(*next) > interval * 4 {
+        *next = after;
+    }
+    Ok(())
+}
+
+/// Windows 专用抓帧循环：直接 BitBlt 到 DIB 缓冲，像素零拷贝交给 FFmpeg。
+/// 实测 xcap 的 `capture_image` 在本机 1080p 下约 256ms/帧（3.9fps），
+/// 换成 BitBlt 后每帧约 33ms，才够 30 帧的预算。
+#[cfg(windows)]
 fn record_loop(
     rect: Option<RecordRect>,
     fps: u32,
     out: std::path::PathBuf,
     ffmpeg: String,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    seconds_limit: Option<f64>,
+) -> Result<recorder::RecordingStats, String> {
+    let _timer = win_capture::TimerResolution::new();
+    let (screen_w, screen_h) = win_capture::screen_size();
+    let crop = match rect {
+        Some(r) => (
+            r.x.min(screen_w.saturating_sub(2)) as i32,
+            r.y.min(screen_h.saturating_sub(2)) as i32,
+            r.width.min(screen_w).max(2),
+            r.height.min(screen_h).max(2),
+        ),
+        None => (0, 0, screen_w, screen_h),
+    };
+    let mut grabber = win_capture::FrameGrabber::new(crop.0, crop.1, crop.2, crop.3)?;
+    let (width, height) = (grabber.width(), grabber.height());
+    if width < 16 || height < 16 {
+        return Err(format!("录制区域太小：{width}×{height}"));
+    }
+
+    let codec = pick_encoder(&ffmpeg);
+    let mut encoder = recorder::Encoder::start(&recorder::EncoderSpec {
+        width,
+        height,
+        fps,
+        out,
+        ffmpeg,
+        crf: 20,
+        pix_fmt: "bgra",
+        preset: "ultrafast",
+        codec,
+    })?;
+    encoder.set_backend(format!("{}+{}", grabber.backend(), codec));
+
+    let interval = Duration::from_nanos(1_000_000_000u64 / fps.max(1) as u64);
+    let started = std::time::Instant::now();
+    let mut next = started;
+    loop {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        if let Some(limit) = seconds_limit {
+            if started.elapsed().as_secs_f64() >= limit {
+                break;
+            }
+        }
+        let t0 = std::time::Instant::now();
+        let frame = grabber.grab()?;
+        encoder.note_grab(t0.elapsed());
+        encoder.push_frame(frame)?;
+        next += interval;
+        let now = std::time::Instant::now();
+        pace_frame(&mut encoder, frame, &mut next, interval, now)?;
+    }
+    // 尾巴补齐：按真实跑秒数把缺的帧补上，避免成片比实际录制短
+    let elapsed = started.elapsed().as_secs_f64();
+    if let Ok(tail) = grabber.grab() {
+        let _ = encoder.pad_to(elapsed, tail);
+    }
+    encoder.finish()
+}
+
+/// 其他平台的抓帧循环：xcap 抓整屏再裁选区。
+#[cfg(not(windows))]
+fn record_loop(
+    rect: Option<RecordRect>,
+    fps: u32,
+    out: std::path::PathBuf,
+    ffmpeg: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    seconds_limit: Option<f64>,
 ) -> Result<recorder::RecordingStats, String> {
     let monitors = xcap::Monitor::all().map_err(err)?;
     let monitor = monitors.into_iter().next().ok_or("没有检测到显示器")?;
+    let started = std::time::Instant::now();
 
     let first = monitor.capture_image().map_err(err)?;
     let (screen_w, screen_h) = (first.width(), first.height());
@@ -608,6 +750,9 @@ fn record_loop(
         out,
         ffmpeg,
         crf: 20,
+        pix_fmt: "rgba",
+        preset: "veryfast",
+        codec: "libx264",
     })?;
 
     let interval = Duration::from_nanos(1_000_000_000u64 / fps.max(1) as u64);
@@ -617,21 +762,24 @@ fn record_loop(
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             break;
         }
+        if let Some(limit) = seconds_limit {
+            if started.elapsed().as_secs_f64() >= limit {
+                break;
+            }
+        }
+        let t0 = std::time::Instant::now();
         let image = match pending.take() {
             Some(frame) => frame,
             None => monitor.capture_image().map_err(err)?,
         };
         let raw = image.into_raw();
         let frame = recorder::crop_rgba(&raw, screen_w, screen_h, crop.0, crop.1, width, height)?;
+        encoder.note_grab(t0.elapsed());
         encoder.push_frame(&frame)?;
 
         next += interval;
         let now = std::time::Instant::now();
-        if next > now {
-            std::thread::sleep(next - now);
-        } else if now.duration_since(next) > interval * 3 {
-            next = now;
-        }
+        pace_frame(&mut encoder, &frame, &mut next, interval, now)?;
     }
     encoder.finish()
 }
@@ -685,7 +833,7 @@ fn start_recording(
     let thread_stop = stop.clone();
     let thread_out = out.clone();
     let ffmpeg_bin = resolve_ffmpeg(ffmpeg);
-    let handle = std::thread::spawn(move || record_loop(rect, fps, thread_out, ffmpeg_bin, thread_stop));
+    let handle = std::thread::spawn(move || record_loop(rect, fps, thread_out, ffmpeg_bin, thread_stop, None));
     *slot = Some(Recording { stop, handle });
     Ok(out.to_string_lossy().to_string())
 }
@@ -704,6 +852,57 @@ fn stop_recording() -> Result<recorder::RecordingStats, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // --record-probe=<路径>:<秒数>：不开窗口，直接跑一次录制做帧率标定。
+    // GUI 子系统没有控制台，结果写到 <路径>.log，退出码 0/1 表示成败。
+    if let Some(value) = std::env::args().find_map(|arg| arg.strip_prefix("--record-probe=").map(str::to_string)) {
+        let (out, seconds) = match value.rsplit_once(':') {
+            Some((path, secs)) => (path.to_string(), secs.parse::<f64>().unwrap_or(60.0)),
+            None => (value, 60.0),
+        };
+        // 可选：--probe-rect=x,y,width,height —— 只录一块选区，量小面积的抓帧上限
+        let probe_rect = std::env::args()
+            .find_map(|arg| arg.strip_prefix("--probe-rect=").map(str::to_string))
+            .and_then(|value| {
+                let parts: Vec<u32> = value.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                if parts.len() == 4 {
+                    Some(RecordRect {
+                        x: parts[0],
+                        y: parts[1],
+                        width: parts[2],
+                        height: parts[3],
+                    })
+                } else {
+                    None
+                }
+            });
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = record_loop(
+            probe_rect,
+            30,
+            std::path::PathBuf::from(&out),
+            resolve_ffmpeg(None),
+            stop,
+            Some(seconds),
+        );
+        let report = match &result {
+            Ok(stats) => format!(
+                "OK path={} frames={} seconds={} fps={} dropped={} write_avg_ms={} grab_avg_ms={} repeats={} backend={}",
+                stats.path,
+                stats.frames,
+                stats.seconds,
+                stats.fps,
+                stats.dropped,
+                stats.write_avg_ms,
+                stats.grab_avg_ms,
+                stats.repeats,
+                stats.backend
+            ),
+            Err(e) => format!("FAIL {e}"),
+        };
+        let _ = std::fs::write(format!("{out}.log"), report.as_bytes());
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
+
     // --quick：只把快捷浮窗叫出来（可配合开机自启，日常不用展开主窗）。
     let start_quick = std::env::args().any(|arg| arg == "--quick");
     log_line(&format!("[boot] run start_quick={start_quick}"));

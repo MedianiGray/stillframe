@@ -25,6 +25,12 @@ pub struct EncoderSpec {
     /// FFmpeg 可执行文件：默认走 PATH，Windows 上可传 sidecar 的绝对路径。
     pub ffmpeg: String,
     pub crf: u32,
+    /// 输入像素格式：xcap 给 RGBA，Windows 专用抓帧器给 BGRA。
+    pub pix_fmt: &'static str,
+    /// x264 preset：Windows 抓帧已吃掉不少 CPU，编码让一档给 ultrafast。
+    pub preset: &'static str,
+    /// 编码器：`h264_qsv`（核显）或 `libx264`（软件）。
+    pub codec: &'static str,
 }
 
 /// 一次录制的实绩：帧数、时长、实际帧率、估算掉帧数。
@@ -36,6 +42,14 @@ pub struct RecordingStats {
     pub fps: f64,
     pub dropped: u64,
     pub path: String,
+    /// 每帧平均花在「写管道」上的毫秒数；远大于抓帧耗时说明编码端是瓶颈。
+    pub write_avg_ms: f64,
+    /// 每帧平均抓屏耗时（毫秒）。和 write_avg_ms 一起就能定位瓶颈在抓帧还是编码。
+    pub grab_avg_ms: f64,
+    /// 为对齐时间轴而重复写出的帧数。这些帧不计入真实帧率。
+    pub repeats: u64,
+    /// 实际走的抓帧 + 编码组合，例如 `dxgi+h264_qsv`。
+    pub backend: String,
 }
 
 pub struct Encoder {
@@ -46,6 +60,14 @@ pub struct Encoder {
     started: Instant,
     target_fps: u32,
     path: String,
+    /// 写帧累计耗时（微秒），标定时用来看「是不是卡在管道上」。
+    write_micros: u128,
+    /// 抓帧累计耗时（微秒）。
+    grab_micros: u128,
+    /// 重复帧计数（时间轴补齐）。
+    repeats: u64,
+    /// 抓帧 + 编码后端标识，只用于报表。
+    backend: String,
 }
 
 impl Encoder {
@@ -58,7 +80,7 @@ impl Encoder {
             "-f",
             "rawvideo",
             "-pix_fmt",
-            "rgba",
+            spec.pix_fmt,
             "-s",
             &format!("{}x{}", spec.width, spec.height),
             "-r",
@@ -66,18 +88,33 @@ impl Encoder {
             "-i",
             "-",
             "-an",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            &spec.crf.to_string(),
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-y",
         ]);
+        // 硬件编码器优先（Windows 上由调用方探测后传入），CPU 让给抓帧；
+        // 回退 libx264 时按 preset/crf 走软件编码。
+        if spec.codec == "h264_qsv" {
+            cmd.args([
+                "-c:v",
+                "h264_qsv",
+                "-preset",
+                "veryfast",
+                "-global_quality",
+                &spec.crf.to_string(),
+                "-pix_fmt",
+                "nv12",
+            ]);
+        } else {
+            cmd.args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                spec.preset,
+                "-crf",
+                &spec.crf.to_string(),
+                "-pix_fmt",
+                "yuv420p",
+            ]);
+        }
+        cmd.args(["-movflags", "+faststart", "-y"]);
         cmd.arg(&spec.out);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -96,7 +133,47 @@ impl Encoder {
             started: Instant::now(),
             target_fps: spec.fps,
             path: spec.out.to_string_lossy().to_string(),
+            write_micros: 0,
+            grab_micros: 0,
+            repeats: 0,
+            backend: "unknown".to_string(),
         })
+    }
+
+    /// 记下本次走的后端（例如 `dxgi+h264_qsv`），只用于报表和标定。
+    pub fn set_backend(&mut self, name: String) {
+        self.backend = name;
+    }
+
+    /// 已写出的帧数（含重复帧）。
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// 收尾补齐：让成片时长对上真实录制时长。抓帧追不上节拍时中间已经补帧，
+    /// 但尾巴上还会差几帧，这里按实际秒数把缺的补上，成片才不会被快放。
+    pub fn pad_to(&mut self, elapsed: f64, frame: &[u8]) -> Result<u64, String> {
+        let expected = (elapsed * self.target_fps as f64).round() as u64;
+        let mut padded = 0;
+        while self.frames < expected {
+            self.push_repeat(frame)?;
+            padded += 1;
+        }
+        Ok(padded)
+    }
+
+    pub fn note_grab(&mut self, spent: std::time::Duration) {
+        self.grab_micros += spent.as_micros();
+    }
+
+    /// 重复写上一帧来补齐时间轴：抓帧跟不上 30fps 时，成片时长才不会缩水成快放。
+    pub fn push_repeat(&mut self, frame: &[u8]) -> Result<(), String> {
+        self.stdin
+            .write_all(frame)
+            .map_err(|e| format!("写入编码器失败：{e}"))?;
+        self.frames += 1;
+        self.repeats += 1;
+        Ok(())
     }
 
     /// 写入一帧 RGBA。长度不符直接报错——宁可不录，也不要写歪掉的画面。
@@ -108,12 +185,15 @@ impl Encoder {
                 frame.len()
             ));
         }
+        let t0 = Instant::now();
         self.stdin
             .write_all(frame)
             .map_err(|e| format!("写入编码器失败：{e}"))?;
+        self.write_micros += t0.elapsed().as_micros();
         self.frames += 1;
         Ok(())
     }
+
 
     /// 关闭输入管道等 FFmpeg 收尾，返回实绩。
     pub fn finish(mut self) -> Result<RecordingStats, String> {
@@ -131,14 +211,34 @@ impl Encoder {
         if frames == 0 {
             return Err("一帧都没录到：目标窗口或显示器可能不可见".to_string());
         }
-        let fps = if seconds > 0.0 { frames as f64 / seconds } else { 0.0 };
+        // 真实帧率要把「补齐用的重复帧」剔掉，否则会虚高。
+        let real_frames = frames.saturating_sub(self.repeats);
+        let fps = if seconds > 0.0 {
+            real_frames as f64 / seconds
+        } else {
+            0.0
+        };
         let expected = (seconds * target_fps as f64).round() as u64;
+        let write_avg_ms = if real_frames > 0 {
+            ((self.write_micros as f64 / real_frames as f64) / 1000.0 * 10.0).round() / 10.0
+        } else {
+            0.0
+        };
+        let grab_avg_ms = if real_frames > 0 {
+            ((self.grab_micros as f64 / real_frames as f64) / 1000.0 * 10.0).round() / 10.0
+        } else {
+            0.0
+        };
         Ok(RecordingStats {
             frames,
             seconds: (seconds * 100.0).round() / 100.0,
             fps: (fps * 10.0).round() / 10.0,
             dropped: expected.saturating_sub(frames),
             path,
+            write_avg_ms,
+            grab_avg_ms,
+            repeats: self.repeats,
+            backend: self.backend,
         })
     }
 }
