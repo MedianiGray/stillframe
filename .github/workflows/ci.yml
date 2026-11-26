@@ -66,6 +66,8 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
+        # 上游偶发下载 SDK 失败，不让它拖垮整条 CI；下面的 assembleDebug 才是判据
+        continue-on-error: true
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
