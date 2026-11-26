@@ -15,6 +15,22 @@ export interface ScrollSample {
 
 export type ScrollVerdict = 'continue' | 'end' | 'fallback';
 
+/** 屏幕矩形（物理像素）。窗口和选区都换算到这一套坐标再比。 */
+export interface ScreenBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 选区（Rect 记法，w/h 是宽高）。 */
+export interface ScreenRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ScrollLimits {
   /** 最多自动滚多少屏，防止无限循环 */
   maxFrames?: number;
@@ -26,6 +42,18 @@ export interface ScrollLimits {
 
 /** 一档滚轮大约推进 50px（系统默认 3 行 × 行高）。取视口 70%，避免重叠区不足。 */
 const PIXELS_PER_NOTCH = 50;
+
+/**
+ * 自己窗口会不会挡住截取区域。
+ *
+ * 重叠宽高都要超过 margin 才算遮挡：贴着边 1~2px 蹭到不算，
+ * 否则每张长图都会无谓地把自己的窗口收起来，反而打断用户。
+ */
+export function shadowsCapture(box: ScreenBox, region: ScreenRegion, margin = 8): boolean {
+  const overlapX = Math.min(box.x + box.width, region.x + region.w) - Math.max(box.x, region.x);
+  const overlapY = Math.min(box.y + box.height, region.y + region.h) - Math.max(box.y, region.y);
+  return overlapX > margin && overlapY > margin;
+}
 
 export function wheelNotches(viewHeight: number): number {
   const target = Math.max(64, viewHeight * 0.7);

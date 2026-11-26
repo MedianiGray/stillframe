@@ -16,8 +16,14 @@ import type { Rect } from '../../lib/types';
 import type { ScreenSession } from '../../lib/capture';
 import { grabRegion } from '../../lib/capture';
 import { stitchHorizontal, stitchVertical } from '../../lib/stitch';
-import { judgeScroll, sampledDifference, wheelNotches, type ScrollSample } from '../../lib/autoscroll';
-import { hostKind, nativeScroll } from '../../lib/desktop';
+import {
+  judgeScroll,
+  sampledDifference,
+  shadowsCapture,
+  wheelNotches,
+  type ScrollSample,
+} from '../../lib/autoscroll';
+import { hostKind, nativeHideSelf, nativeScroll, nativeSelfRect, nativeShowSelf } from '../../lib/desktop';
 import { canvasToBlob, copyBlobToClipboard, downloadBlob, timestampName } from '../../lib/image';
 import { QQ_TEXT } from '../../lib/qqspec';
 import { useToast } from '../Toasts';
@@ -111,7 +117,20 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
     let base = resultRef.current;
     let lastFrame = grabRegion(session.video, rect);
     const samples: ScrollSample[] = [];
+    // 窗口藏起来的那几秒里，界面上的 toast 用户是看不见的：结果先记账，露脸后再报。
+    let hidden = false;
+    let outcome: { message: string; kind: 'ok' | 'warn' } | null = null;
     try {
+      // 本窗口压在选区上时，滚一屏就会把它自己拍进去、拼进长图：先收起来，结束后再露面。
+      const self = await nativeSelfRect();
+      if (self && shadowsCapture(self, rect)) {
+        hidden = true;
+        await nativeHideSelf();
+        // 等窗口真正退场（任务栏与焦点动画）再取基准帧，否则首帧还是带着自己。
+        await new Promise((r) => setTimeout(r, 220));
+        lastFrame = grabRegion(session.video, rect);
+      }
+
       for (let frame = 0; frame < 30 && runningRef.current; frame += 1) {
         await nativeScroll(rect.x + rect.w / 2, rect.y + rect.h / 2, notches);
         // 原生会话 320ms 抓一次帧，等它刷新并让目标窗口滚稳。
@@ -127,25 +146,40 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
 
         const verdict = judgeScroll(samples);
         if (verdict === 'end') {
-          toast(`已滚到底，共 ${samples.length} 屏，自动滚动结束`, 'ok');
+          outcome = { message: `已滚到底，共 ${samples.length} 屏，自动滚动结束`, kind: 'ok' };
           break;
         }
         if (verdict === 'fallback') {
           setShowManual(true);
-          toast('滚过去没找到重叠区，已停下：请手动滚动一屏并填写重叠像素', 'warn');
+          outcome = {
+            message: '滚过去没找到重叠区，已停下：请手动滚动一屏并填写重叠像素',
+            kind: 'warn',
+          };
           break;
         }
       }
     } catch (error) {
       setShowManual(true);
-      toast(
-        `${error instanceof Error ? error.message : '自动滚动失败'}；已切换为手动追加，滚动后点加号即可`,
-        'warn',
-      );
+      outcome = {
+        message: `${error instanceof Error ? error.message : '自动滚动失败'}；已切换为手动追加，滚动后点加号即可`,
+        kind: 'warn',
+      };
     } finally {
       runningRef.current = false;
       setAutoScroll(false);
       setBusy(false);
+      if (hidden) {
+        try {
+          await nativeShowSelf();
+        } catch {
+          // 恢复失败不该掩盖前面的结果，交给用户自己关窗。
+        }
+      }
+      if (outcome) {
+        const suffix =
+          hidden && outcome.kind === 'ok' ? '（期间本窗口压住选区，已暂时隐藏再恢复）' : '';
+        toast(`${outcome.message}${suffix}`, outcome.kind);
+      }
     }
   };
 

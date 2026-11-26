@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { judgeScroll, wheelNotches } from '../src/lib/autoscroll';
+import { judgeScroll, shadowsCapture, wheelNotches } from '../src/lib/autoscroll';
 
 describe('长截图自动滚动判定', () => {
   it('视口 70% 折算档数，并夹在 1~20 档', () => {
@@ -43,5 +43,24 @@ describe('长截图自动滚动判定', () => {
   it('超过屏数上限强制结束', () => {
     const many = Array.from({ length: 30 }, () => ({ overlap: 90, difference: 0.1 }));
     expect(judgeScroll(many, { maxFrames: 30 })).toBe('end');
+  });
+
+  it('窗口压住选区才算遮挡，贴边蹭到不算', () => {
+    const region = { x: 100, y: 100, w: 800, h: 600 };
+    // 整块盖住
+    expect(shadowsCapture({ x: 0, y: 0, width: 1000, height: 800 }, region)).toBe(true);
+    // 只压住右边缘一条 3px 缝：不值得为它把窗口藏起来
+    expect(shadowsCapture({ x: 897, y: 0, width: 400, height: 800 }, region)).toBe(false);
+    // 完全在选区外面
+    expect(shadowsCapture({ x: 1200, y: 0, width: 300, height: 400 }, region)).toBe(false);
+    // 横跨选区上沿、压进去 40px：算遮挡
+    expect(shadowsCapture({ x: 300, y: 0, width: 600, height: 140 }, region)).toBe(true);
+  });
+
+  it('margin 可按屏幕密度放宽', () => {
+    const region = { x: 0, y: 0, w: 500, h: 500 };
+    const box = { x: 0, y: 0, width: 520, height: 30 };
+    expect(shadowsCapture(box, region, 8)).toBe(true);
+    expect(shadowsCapture(box, region, 40)).toBe(false);
   });
 });

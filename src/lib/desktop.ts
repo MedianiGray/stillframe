@@ -208,6 +208,26 @@ export async function nativeScroll(x: number, y: number, notches: number): Promi
   await invoke('scroll_at', { x: Math.round(x), y: Math.round(y), notches });
 }
 
+/** 桌面壳自身窗口的屏幕矩形（物理像素），用于判断它会不会挡在截取区域上。 */
+export interface HostRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export async function nativeSelfRect(): Promise<HostRect | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  try {
+    const rect = (await invoke('self_rect')) as HostRect | null;
+    if (!rect || typeof rect.width !== 'number' || rect.width <= 0) return null;
+    return rect;
+  } catch {
+    return null;
+  }
+}
+
 /** 打开快捷浮窗（桌面壳）。浏览器没有这个能力。 */
 export async function nativeOpenQuick(): Promise<boolean> {
   const invoke = desktopInvoke();

@@ -189,6 +189,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn clamps_wheel_notches() {
         assert_eq!(wheel_delta(3), 360);
         assert_eq!(wheel_delta(-2), -240);
@@ -312,10 +313,12 @@ fn show_self(window: tauri::WebviewWindow) -> Result<(), String> {
 }
 
 /// 一档滚轮的 delta 值（Windows 的 WHEEL_DELTA）。
+#[cfg(windows)]
 const WHEEL_DELTA: i32 = 120;
 
 /// 把界面传来的「档数」折算成 SendInput 需要的 delta，并夹在 ±20 档内，
 /// 避免一次注入把目标窗口甩出太远、重叠区不够。
+#[cfg(windows)]
 fn wheel_delta(notches: i32) -> i32 {
     notches.clamp(-20, 20) * WHEEL_DELTA
 }
@@ -460,29 +463,58 @@ fn quick_main(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn shortcuts() -> Vec<(Shortcut, &'static str)> {
+/// 全局热键表：(快捷键, 前端模式名, 给用户看键位)。
+/// 第三项是「注册失败时告诉用户具体是哪一组」的唯一来源，避免提示里写死键位。
+fn shortcuts() -> Vec<(Shortcut, &'static str, &'static str)> {
     vec![
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS),
             "snap",
+            "Ctrl+Alt+S",
         ),
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR),
             "record",
+            "Ctrl+Alt+R",
         ),
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyC),
             "scroll",
+            "Ctrl+Alt+C",
         ),
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyO),
             "ocr",
+            "Ctrl+Alt+O",
         ),
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyF),
             "translate",
+            "Ctrl+Alt+F",
         ),
     ]
+}
+
+/// 把自己窗口在屏幕上的位置和大小交给前端：长图自动滚动要用它判断「本窗口会不会被拍进去」。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelfRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[tauri::command]
+fn self_rect(window: tauri::WebviewWindow) -> Result<SelfRect, String> {
+    let position = window.outer_position().map_err(err)?;
+    let size = window.outer_size().map_err(err)?;
+    Ok(SelfRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -504,6 +536,7 @@ pub fn run() {
             list_windows,
             hide_self,
             show_self,
+            self_rect,
             scroll_at,
             open_quick,
             close_quick,
@@ -514,7 +547,7 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
-                for (shortcut, mode) in shortcuts() {
+                for (shortcut, mode, keys) in shortcuts() {
                     let handle = app.handle().clone();
                     // 快捷键可能被别的截图工具（QQ/微信）先注册：注册失败只提示，不让整个壳起不来。
                     let result = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
@@ -524,7 +557,11 @@ pub fn run() {
                         }
                     });
                     if let Err(err) = result {
-                        eprintln!("[stillframe] 快捷键 {mode} 注册失败：{err}");
+                        log_line(&format!("[hotkey] {keys} -> {mode} 注册失败：{err}"));
+                        // 静默失败等于骗人：把「哪组键没抢到」明确告诉界面。
+                        let _ = app
+                            .handle()
+                            .emit("stillframe://shortcut-failed", format!("{mode}|{keys}"));
                     }
                 }
 
@@ -541,7 +578,10 @@ pub fn run() {
                     },
                 );
                 if let Err(err) = quick_result {
-                    eprintln!("[stillframe] 快捷键 quick 注册失败：{err}");
+                    log_line(&format!("[hotkey] Ctrl+Alt+Q -> quick 注册失败：{err}"));
+                    let _ = app
+                        .handle()
+                        .emit("stillframe://shortcut-failed", "quick|Ctrl+Alt+Q");
                 }
             }
             let _ = app.get_webview_window("main");
