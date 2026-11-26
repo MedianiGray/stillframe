@@ -254,6 +254,24 @@ fn list_windows() -> Result<Vec<WindowInfo>, String> {
     Ok(rows)
 }
 
+/// 按窗口句柄抓一张：对应系统截图工具里的「窗口截图」，不受窗口是否被遮挡影响。
+#[tauri::command]
+fn capture_window(id: u32) -> Result<String, String> {
+    let windows = xcap::Window::all().map_err(err)?;
+    let target = windows
+        .into_iter()
+        .find(|window| window.id().unwrap_or(0) == id)
+        .ok_or("窗口已关闭，请刷新列表")?;
+    if target.is_minimized().unwrap_or(false) {
+        return Err("窗口已最小化，先还原再截".to_string());
+    }
+    let image = target.capture_image().map_err(err)?;
+    let width = image.width();
+    let height = image.height();
+    let png_bytes = encode_png(image.into_raw(), width, height)?;
+    Ok(format!("data:image/png;base64,{}", STANDARD.encode(png_bytes)))
+}
+
 /// 截图前把自己藏起来，避免把 Stillframe 自己拍进画面。
 #[tauri::command]
 fn hide_self(window: tauri::WebviewWindow) -> Result<(), String> {
@@ -452,6 +470,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             capture_screen,
+            capture_window,
             pin_image,
             save_png,
             write_shot,

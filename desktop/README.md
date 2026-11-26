@@ -43,6 +43,7 @@ cargo tauri icon icons/icon.png
 | 命令 | 说明 |
 | --- | --- |
 | `capture_screen` | 抓主显示器整屏 → `data:image/png;base64,...`。**不触发系统授权弹窗** |
+| `capture_window` | 按 `list_windows` 的 id 抓指定窗口整窗（含被遮挡部分）。窗口最小化时直接报错，不给黑图 |
 | `pin_image` | 开无边框置顶窗口贴图，加载 `pin.html` 并通过 `eval` 注入图像 |
 | `save_png` | 系统保存对话框 → 写盘，返回最终路径 |
 | `write_shot` | 静默写入 `%USERPROFILE%\Pictures\Stillframe`，命名 `stillframe-YYYYMMDD-HHMMSS.png`，不弹框 |

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, ScanText, Save, X } from 'lucide-react';
+import { Copy, Languages, ScanText, Save, X } from 'lucide-react';
 import type { Settings } from '../../lib/settings';
 import { recognize } from '../../lib/ocr';
 import { makeThumbnail } from '../../lib/image';
@@ -11,6 +11,8 @@ interface OcrPanelProps {
   settings: Settings;
   onClose: () => void;
   onSaved: () => void;
+  /** 带着同一张图转去译屏；识别结果已在本面板展示，翻译面板会再跑一次本地 OCR。 */
+  onTranslate?: () => void;
 }
 
 const LANGS = [
@@ -20,7 +22,7 @@ const LANGS = [
   { id: 'jpn', label: '日文' },
 ];
 
-export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
+export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: OcrPanelProps) {
   const toast = useToast();
   const [lang, setLang] = useState(settings.ocrLang || 'chi_sim+eng');
   const [text, setText] = useState('');
@@ -241,6 +243,17 @@ export function OcrPanel({ image, settings, onClose, onSaved }: OcrPanelProps) {
           <button type="button" className="btn btn-ghost mt-2 w-full" onClick={onClose}>
             <X size={14} /> 返回捕捉台
           </button>
+          {onTranslate ? (
+            <button
+              type="button"
+              className="btn btn-ghost mt-1.5 w-full"
+              onClick={() => {
+                onTranslate();
+              }}
+            >
+              <Languages size={14} /> 译屏 · 把这张图转成译文
+            </button>
+          ) : null}
         </div>
       </aside>
     </div>

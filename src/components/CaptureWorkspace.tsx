@@ -4,7 +4,7 @@ import type { Rect, ToolMode } from '../lib/types';
 import type { Settings } from '../lib/settings';
 import { cropCanvas } from '../lib/image';
 import { grabFrame, openNativeSession, openScreenSession, type ScreenSession } from '../lib/capture';
-import { hostKind, isDesktop, nativeCaptureScreen, nativeHideSelf, nativeShowSelf } from '../lib/desktop';
+import { hostKind, isDesktop, nativeCaptureScreen, nativeCaptureWindow, nativeHideSelf, nativeListWindows, nativeShowSelf, type NativeWindow } from '../lib/desktop';
 import { useToast } from './Toasts';
 import { SelectionOverlay } from './SelectionOverlay';
 import { Editor } from './Editor';
@@ -94,6 +94,9 @@ export function CaptureWorkspace({
   const [delay, setDelay] = useState<0 | 3 | 5>(0);
   const [countdown, setCountdown] = useState<number | null>(null);
   const cancelCountdownRef = useRef(false);
+  const [windows, setWindows] = useState<NativeWindow[]>([]);
+  const [windowId, setWindowId] = useState<number | null>(null);
+  const [windowsBusy, setWindowsBusy] = useState(false);
   const sessionRef = useRef<ScreenSession | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -117,8 +120,46 @@ export function CaptureWorkspace({
     }
   };
 
-  const start = async (target: ToolMode) => {
+  const singleFrameMode = mode === 'snap' || mode === 'ocr' || mode === 'translate';
+
+  const refreshWindows = useCallback(async () => {
+    if (hostKind() !== 'tauri') return;
+    setWindowsBusy(true);
+    try {
+      const rows = await nativeListWindows();
+      const visible = rows.filter((row) => row.id > 0 && !row.title.includes('Stillframe'));
+      setWindows(visible);
+      setWindowId((current) => (current && visible.some((row) => row.id === current) ? current : visible[0]?.id ?? null));
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '读窗口列表失败', 'warn');
+    } finally {
+      setWindowsBusy(false);
+    }
+    // toast 在页面生命周期内稳定，输入只影响提示文案，不需要重建回调。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (hostKind() === 'tauri' && singleFrameMode) void refreshWindows();
+  }, [singleFrameMode, refreshWindows]);
+
+  /** 窗口截图：不框选，直接把目标窗口整张抓进来，再走原来的标注 / 取字 / 翻译。 */
+  const pickWindow = async (id: number) => {
     setLoading(true);
+    try {
+      const image = await nativeCaptureWindow(id);
+      if (!image) throw new Error('窗口画面没有返回');
+      const rect: Rect = { x: 0, y: 0, w: image.width, h: image.height };
+      if (mode === 'snap') setState({ kind: 'edit', image, rect });
+      else setState(mode === 'ocr' ? { kind: 'ocr', image } : { kind: 'translate', image });
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '窗口截图失败', 'warn');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const start = async (target: ToolMode) => {    setLoading(true);
     const singleFrame = target === 'snap' || target === 'ocr' || target === 'translate';
     try {
       if (isDesktop()) {
@@ -328,7 +369,7 @@ export function CaptureWorkspace({
   }
 
   if (state.kind === 'ocr') {
-    return <OcrPanel image={state.image} settings={settings} onClose={finish} onSaved={onLibraryChanged} />;
+    return <OcrPanel image={state.image} settings={settings} onClose={finish} onSaved={onLibraryChanged} onTranslate={() => setState({ kind: 'translate', image: state.image })} />;
   }
 
   if (state.kind === 'translate') {
@@ -349,7 +390,7 @@ export function CaptureWorkspace({
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="stage-grid flex min-h-0 flex-1 items-center justify-center px-6 py-8">
-        <div className="w-full max-w-[880px]">
+        <div className="w-full max-w-[840px]">
           <div className="flex items-start gap-4">
             <div className="relative flex h-14 w-14 shrink-0 items-center justify-center border border-amber/40 bg-amber/10">
               <span className="frame-corner -left-px -top-px border-l-2 border-t-2" />
@@ -367,9 +408,9 @@ export function CaptureWorkspace({
 
           <p className="mt-5 max-w-[640px] text-[13px] leading-6 text-paper/75">{meta.detail}</p>
 
-          <ul className="mt-4 grid gap-1.5 sm:grid-cols-3">
+          <ul className="mt-4 flex flex-wrap gap-1.5">
             {meta.keys.map((key) => (
-              <li key={key} className="flex items-start gap-2 border border-ink-600/60 bg-ink-850 px-2.5 py-2 text-[11.5px] leading-5 text-muted">
+              <li key={key} className="flex min-w-0 flex-1 basis-[220px] items-start gap-2 break-words border border-ink-600/60 bg-ink-850 px-2.5 py-2 text-[11.5px] leading-5 text-muted">
                 <span className="mt-2 h-1 w-1 shrink-0 bg-amber/70" />
                 {key}
               </li>
@@ -412,6 +453,45 @@ export function CaptureWorkspace({
           <p className="mt-2 font-mono text-[10px] tracking-wider text-muted/70">
             {host === 'tauri' ? 'Ctrl+Alt+Q 呼出快捷浮窗 · Ctrl+Alt+S / C / R / O / F 直接进入对应模式' : ''}
           </p>
+
+          {host === 'tauri' && singleFrameMode ? (
+            <div className="mt-4 flex flex-wrap items-center gap-2 border border-ink-600/60 bg-ink-850 px-3 py-2">
+              <span className="label shrink-0">窗口截图</span>
+              <select
+                className="field !py-1 min-w-0 max-w-[320px] flex-1 !text-[12px]"
+                value={windowId ?? ''}
+                disabled={windowsBusy}
+                onChange={(event) => setWindowId(Number(event.target.value) || null)}
+              >
+                {windows.length === 0 ? (
+                  <option value="">没有可选窗口</option>
+                ) : (
+                  windows.map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.title}
+                      {row.app ? ` · ${row.app}` : ''}
+                    </option>
+                  ))
+                )}
+              </select>
+              <button
+                type="button"
+                className="btn !py-1 text-[12px]"
+                disabled={!windowId || loading}
+                onClick={() => windowId && void pickWindow(windowId)}
+              >
+                截这个窗口
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost !py-1 text-[12px]"
+                disabled={windowsBusy}
+                onClick={() => void refreshWindows()}
+              >
+                {windowsBusy ? '刷新中' : '刷新'}
+              </button>
+            </div>
+          ) : null}
 
           <div className="mt-8 sprocket opacity-30" />
 

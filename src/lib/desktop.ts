@@ -96,6 +96,25 @@ export async function nativeCaptureScreen(): Promise<HTMLCanvasElement | null> {
   return dataUrlToCanvas(payload);
 }
 
+export interface NativeWindow {
+  id: number;
+  title: string;
+  app?: string;
+  width?: number;
+  height?: number;
+}
+
+/** 按窗口抓一张（桌面壳）。浏览器 / Android 返回 null，由 UI 隐藏该入口。 */
+export async function nativeCaptureWindow(id: number): Promise<HTMLCanvasElement | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const payload = await invoke('capture_window', { id });
+  if (typeof payload !== 'string' || !payload.startsWith('data:image')) {
+    throw new Error('原生命令没有返回窗口画面');
+  }
+  return dataUrlToCanvas(payload);
+}
+
 /**
  * 贴图：桌面壳开置顶窗口，Android 添加悬浮窗，浏览器返回 false 由 UI 用页内浮层兜底。
  * width / height 传原图尺寸，桌面壳据此按比例定窗（此前固定 600×500 会把图拉变形）。
@@ -138,11 +157,11 @@ export async function nativeWriteShot(dataUrl: string, suggested: string): Promi
   return typeof saved === 'string' ? saved : null;
 }
 
-export async function nativeListWindows(): Promise<Array<{ title: string; id: number }>> {
+export async function nativeListWindows(): Promise<NativeWindow[]> {
   const invoke = desktopInvoke();
   if (!invoke) return [];
   const rows = await invoke('list_windows');
-  return Array.isArray(rows) ? (rows as Array<{ title: string; id: number }>) : [];
+  return Array.isArray(rows) ? (rows as NativeWindow[]) : [];
 }
 
 /** 截图前藏起自己（对应「隐藏当前窗口」）。 */
