@@ -37,7 +37,8 @@
 
 ### 第四批：让失败可见、让长图不拍到自己
 
-- **热键注册失败不再静默**：`shortcuts()` 同时返回键位文案，注册失败时向界面广播 `stillframe://shortcut-failed`（`模式|键位`）；界面顶部出现一条可关闭提示，点名「截图 Ctrl+Alt+S 已被其他程序占用」并指向模式卡与快捷浮窗这两个替代入口。Ctrl+Alt+Q 的失败走同一套上报。原先只写一行 `eprintln`，而 GUI 子系统没有控制台，用户按不出反应也无从得知。
+- **热键注册失败不再静默**：`shortcuts()` 同时返回键位文案，注册失败时向界面广播 `stillframe://shortcut-failed`（`模式|键位`）；界面顶部出现一条可关闭提示，点名「以下快捷键已被其他程序占用：截图 Ctrl+Alt+S」并指向模式卡与快捷浮窗这两个替代入口。Ctrl+Alt+Q 的失败走同一套上报。原先只写一行 `eprintln`，而 GUI 子系统没有控制台，用户按不出反应也无从得知。
+- **热键占用改成「先探测再注册」**：真机上验一次就露出问题——Ctrl+Alt+S 被别的工具占用（`RegisterHotKey` 返回 1409 `ERROR_HOTKEY_ALREADY_REGISTERED`）时，`tauri-plugin-global-shortcut` 的 `on_shortcut` 仍返回 `Ok`，失败被插件吞掉，上面那条基于 `Err` 的上报根本不会触发。现在注册前先用 `RegisterHotKey` 自探一次（成功立刻 `UnregisterHotKey`），探不到就直接记账、广播事件并跳过硬注册；Ctrl+Alt+Q 同套。真机验证：另一进程占住 Ctrl+Alt+S 后重启壳，日志出现 `[hotkey] Ctrl+Alt+S -> snap 已被其他程序占用`。
 - **长图自动滚动不再把自己拼进画面**：新增命令 `self_rect`（自身窗口的屏幕矩形，物理像素）。滚动前用 `shadowsCapture` 判断自身窗口是否压住选区（重叠宽高都需超过 8px，贴边蹭到不算），确实遮挡才隐藏自身、结束后恢复；判定为纯函数，补了两条单测（含 margin 放宽）。
 - **隐藏期间的结果不再丢**：滚动结论（到底 / 需手动重叠 / 失败）先记账，等窗口恢复后再弹 toast，避免在窗口藏起来的几秒里弹一条用户看不见的提示。
 - **文档对齐现实**：README 原先写着「自动滚动尚未实现」「desktop 未编译验证」，实际都已跑通；改为如实描述，并把路线图的长截图条目勾掉、录制单列。新增 [docs/SMART-CAPTURE.md](docs/SMART-CAPTURE.md)，给出「智慧截图」的四层定义与可测口径。
