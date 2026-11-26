@@ -116,10 +116,11 @@ export default function App() {
           <div className="flex items-center gap-2 border-b border-amber-400/20 bg-amber-400/[0.07] px-4 py-1.5 text-[11px] leading-none text-amber-200/85">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             <span className="truncate">
+              以下快捷键已被其他程序占用：
               {hotkeyIssues
                 .map((item) => `${MODE_LABEL[item.mode] ?? item.mode} ${item.keys}`)
                 .join('、')}
-              已被其他程序占用，可从左侧模式卡或快捷浮窗进入
+              。可从左侧模式卡或快捷浮窗进入
             </span>
             <button
               type="button"

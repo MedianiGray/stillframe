@@ -463,37 +463,66 @@ fn quick_main(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 全局热键表：(快捷键, 前端模式名, 给用户看键位)。
-/// 第三项是「注册失败时告诉用户具体是哪一组」的唯一来源，避免提示里写死键位。
-fn shortcuts() -> Vec<(Shortcut, &'static str, &'static str)> {
+/// 全局热键表：(快捷键, 前端模式名, 给用户看键位, 虚拟键码)。
+/// 后两项分别用于「告诉用户是哪一组」和「注册前先自己探一次」。
+fn shortcuts() -> Vec<(Shortcut, &'static str, &'static str, u32)> {
     vec![
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS),
             "snap",
             "Ctrl+Alt+S",
+            0x53,
         ),
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR),
             "record",
             "Ctrl+Alt+R",
+            0x52,
         ),
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyC),
             "scroll",
             "Ctrl+Alt+C",
+            0x43,
         ),
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyO),
             "ocr",
             "Ctrl+Alt+O",
+            0x4F,
         ),
         (
             Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyF),
             "translate",
             "Ctrl+Alt+F",
+            0x46,
         ),
     ]
 }
+
+/// 注册前先自己探一次：`RegisterHotKey` 成功就立刻注销，能真拿到才算可用。
+///
+/// 不能只看插件的返回值——实测 Ctrl+Alt+S 被别的工具占用（系统错误 1409）时，
+/// `on_shortcut` 依然返回 Ok，失败被吞掉了，界面上就永远等不到提示。
+#[cfg(windows)]
+fn hotkey_available(vk: u32) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL,
+    };
+    const PROBE_ID: i32 = 0x5350;
+    let mods = MOD_ALT | MOD_CONTROL;
+    let taken = unsafe { RegisterHotKey(None, PROBE_ID, mods, vk) }.is_ok();
+    if taken {
+        let _ = unsafe { UnregisterHotKey(None, PROBE_ID) };
+    }
+    taken
+}
+
+#[cfg(not(windows))]
+fn hotkey_available(_vk: u32) -> bool {
+    true
+}
+
 
 /// 把自己窗口在屏幕上的位置和大小交给前端：长图自动滚动要用它判断「本窗口会不会被拍进去」。
 #[derive(Serialize)]
@@ -547,7 +576,15 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
-                for (shortcut, mode, keys) in shortcuts() {
+                for (shortcut, mode, keys, vk) in shortcuts() {
+                    // 插件被占用时不一定报错，所以先自己探：探不到就直接记账，别再指望返回值。
+                    if !hotkey_available(vk) {
+                        log_line(&format!("[hotkey] {keys} -> {mode} 已被其他程序占用"));
+                        let _ = app
+                            .handle()
+                            .emit("stillframe://shortcut-failed", format!("{mode}|{keys}"));
+                        continue;
+                    }
                     let handle = app.handle().clone();
                     // 快捷键可能被别的截图工具（QQ/微信）先注册：注册失败只提示，不让整个壳起不来。
                     let result = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
@@ -566,22 +603,29 @@ pub fn run() {
                 }
 
                 // Ctrl+Alt+Q 只负责叫出/收起快捷浮窗：作为主窗最小化时的常驻入口。
-                let quick_handle = app.handle().clone();
-                let quick_shortcut =
-                    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyQ);
-                let quick_result = app.global_shortcut().on_shortcut(
-                    quick_shortcut,
-                    move |_app, _shortcut, event| {
-                        if event.state() == ShortcutState::Pressed {
-                            toggle_quick(&quick_handle);
-                        }
-                    },
-                );
-                if let Err(err) = quick_result {
-                    log_line(&format!("[hotkey] Ctrl+Alt+Q -> quick 注册失败：{err}"));
+                if !hotkey_available(0x51) {
+                    log_line("[hotkey] Ctrl+Alt+Q -> quick 已被其他程序占用");
                     let _ = app
                         .handle()
                         .emit("stillframe://shortcut-failed", "quick|Ctrl+Alt+Q");
+                } else {
+                    let quick_handle = app.handle().clone();
+                    let quick_shortcut =
+                        Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyQ);
+                    let quick_result = app.global_shortcut().on_shortcut(
+                        quick_shortcut,
+                        move |_app, _shortcut, event| {
+                            if event.state() == ShortcutState::Pressed {
+                                toggle_quick(&quick_handle);
+                            }
+                        },
+                    );
+                    if let Err(err) = quick_result {
+                        log_line(&format!("[hotkey] Ctrl+Alt+Q -> quick 注册失败：{err}"));
+                        let _ = app
+                            .handle()
+                            .emit("stillframe://shortcut-failed", "quick|Ctrl+Alt+Q");
+                    }
                 }
             }
             let _ = app.get_webview_window("main");
