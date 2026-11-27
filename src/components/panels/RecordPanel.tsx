@@ -262,6 +262,7 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
           { x: Math.round(rect.x), y: Math.round(rect.y), width: w, height: h },
           30,
           voiceOn,
+          soundOn,
         );
         if (!path) throw new Error('桌面壳没有返回录制路径');
         session.stop(); // 停掉预览轮询，把 CPU 让给录制线程
@@ -269,7 +270,14 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
         setNativeDone(null);
         setNativeRecording(true);
         setRecording(true);
-        toast(voiceOn ? '开始录制（原生 30 帧，已采麦克风）' : '开始录制（原生 30 帧，无声）', 'ok');
+        // 声音来源分开报，别一律说成「有声」，参数在 backend 里也看得见
+        const sources = [voiceOn ? '麦克风' : '', soundOn ? '系统声' : ''].filter(Boolean);
+        toast(
+          sources.length
+            ? `开始录制（原生 30 帧，采${sources.join(' + ')}）`
+            : '开始录制（原生 30 帧，无声）',
+          'ok',
+        );
       } catch (error) {
         toast(error instanceof Error ? error.message : '无法开始原生录制', 'warn');
       }
@@ -497,11 +505,16 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
 
             <button
               type="button"
-              title={nativeCapable ? '系统声音要等 WASAPI 环回那一批，原生录制暂只支持麦克风' : soundOn ? QQ_TEXT.soundOff : QQ_TEXT.soundOn}
+              title={nativeCapable ? (soundOn ? '系统声已开（WASAPI 环回）' : '录系统声：扬声器里放什么就录什么') : soundOn ? QQ_TEXT.soundOff : QQ_TEXT.soundOn}
               disabled={nativeRecording}
               className={`${BTN} ${soundOn ? BTN_ON : ''} disabled:opacity-35`}
               onClick={() => {
                 const next = !soundOn;
+                // 桌面壳里系统声由 Rust 的 WASAPI 环回采，WebView 这层没有音轨可开关
+                if (nativeCapable) {
+                  setSoundOn(next);
+                  return;
+                }
                 session.audioTracks.forEach((track) => {
                   track.enabled = next;
                 });

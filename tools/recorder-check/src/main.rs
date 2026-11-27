@@ -56,6 +56,7 @@ fn main() {
         preset: "veryfast",
         codec: "libx264",
         audio: None,
+        system_audio: None,
     })
     .expect("编码器启动失败");
     for i in 0..frames {

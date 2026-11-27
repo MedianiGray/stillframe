@@ -16,6 +16,19 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Instant;
 
+/// 把诊断写进本地临时目录的启动日志。GUI 子系统没有控制台，eprintln 看不见；
+/// 放在本模块里而不是 crate 根，这样 recorder-check 单独编译这份代码时也能编译。
+pub fn log_line(message: &str) {
+    let path = std::path::PathBuf::from(
+        std::env::var("LOCALAPPDATA")
+            .map(|dir| format!("{dir}\\Temp\\stillframe-boot.log"))
+            .unwrap_or_else(|_| "stillframe-boot.log".to_string()),
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{message}");
+    }
+}
+
 /// 编码参数。宽度与高度为偶数时才安全，奇数会被 libx264 拒绝。
 pub struct EncoderSpec {
     pub width: u32,
@@ -31,9 +44,11 @@ pub struct EncoderSpec {
     pub preset: &'static str,
     /// 编码器：`h264_qsv`（核显）或 `libx264`（软件）。
     pub codec: &'static str,
-    /// 麦克风的 DirectShow 设备名；`None` 表示这段只录画面。
+    /// 麦克风的 DirectShow 设备名；`None` 表示这段不采麦克风。
     /// 名字来自 `ffmpeg -f dshow -list_devices true -i dummy` 的枚举结果。
     pub audio: Option<String>,
+    /// 系统声 WAV 的落地路径（由 `win_audio` 的环回采集写好）；`None` 表示不采系统声。
+    pub system_audio: Option<std::path::PathBuf>,
 }
 
 /// 一次录制的实绩：帧数、时长、实际帧率、估算掉帧数。
@@ -78,6 +93,8 @@ pub struct Encoder {
     ffmpeg: String,
     /// 麦克风录制进程、它的输入管道与 WAV 路径。分离进程才能保证停录时立即退出。
     audio_child: Option<(Child, ChildStdin, String)>,
+    /// 系统声 WAV（环回采集由桌面层负责，这里只记路径）。
+    system_audio: Option<std::path::PathBuf>,
 }
 
 impl Encoder {
@@ -201,6 +218,7 @@ impl Encoder {
             ended: None,
             ffmpeg: spec.ffmpeg.clone(),
             audio_child,
+            system_audio: spec.system_audio.clone(),
         })
     }
 
@@ -299,59 +317,41 @@ impl Encoder {
         if frames == 0 {
             return Err("一帧都没录到：目标窗口或显示器可能不可见".to_string());
         }
-        // 音画合流：麦克风是无限实时流，停录只能直接结束进程，再拿两段有限文件封装。
+        // 音画合流：麦克风是无限实时流，停录只能直接结束进程，再拿有限文件封装。
         // 之前把 dshow 接进编码器，视频 stdin EOF 后 FFmpeg 仍在等音频，`-shortest`
         // 也不生效——实测停录后进程不退出，界面会卡死。
+        let mut tracks: Vec<String> = Vec::new();
         if let Some((mut audio_child, audio_stdin, wav)) = self.audio_child.take() {
             drop(audio_stdin);
             let _ = audio_child.kill();
             let _ = audio_child.wait();
-            let wav_ready = std::fs::metadata(&wav).map(|meta| meta.len() > 2048).unwrap_or(false);
-            if wav_ready {
-                // 自动校齐起点：WAV 是 48k 单声道 16 位，按字节数就能算它录了多久。
-                // 设备打开和落盘缓冲会让音频比画面早开始，多出来的那段按 -ss 裁掉，
-                // 再用 -shortest 把尾部对齐到画面，两头都关上。
-                let wav_bytes = std::fs::metadata(&wav).map(|meta| meta.len()).unwrap_or(0);
-                let audio_secs = (wav_bytes.saturating_sub(44)) as f64 / 96_000.0;
-                let video_secs = frames as f64 / target_fps.max(1) as f64;
-                let audio_lead = (audio_secs - video_secs).clamp(0.0, 3.0);
-                let tmp = format!("{path}.mux.mp4");
-                let mut mux = Command::new(&self.ffmpeg);
-                mux.args(["-hide_banner", "-loglevel", "error", "-y", "-i", &path]);
-                if audio_lead > 0.05 {
-                    mux.args(["-ss", &format!("{audio_lead:.3}")]);
-                }
-                let status = mux
-                    .args([
-                        "-i",
-                        &wav,
-                        "-map",
-                        "0:v:0",
-                        "-map",
-                        "1:a:0",
-                        "-c:v",
-                        "copy",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        "128k",
-                        "-shortest",
-                        "-movflags",
-                        "+faststart",
-                        &tmp,
-                    ])
-                    .status();
-                match status {
-                    Ok(status) if status.success() => {
-                        let _ = std::fs::remove_file(&path);
-                        let _ = std::fs::rename(&tmp, &path);
-                    }
-                    _ => {
-                        let _ = std::fs::remove_file(&tmp);
-                    }
+            if wav_ready(&wav) {
+                tracks.push(wav.clone());
+            }
+            // 没有有效数据就删掉，别在录制目录里留个 0 字节的 wav
+            if !tracks.iter().any(|item| item == &wav) {
+                let _ = std::fs::remove_file(&wav);
+            }
+        }
+        if let Some(system) = self.system_audio.take() {
+            if wav_ready(&system) {
+                tracks.push(system.to_string_lossy().to_string());
+            } else {
+                let _ = std::fs::remove_file(&system);
+            }
+        }
+        if !tracks.is_empty() {
+            let video_secs = frames as f64 / target_fps.max(1) as f64;
+            match mux_tracks(&self.ffmpeg, &path, &tracks, video_secs) {
+                Ok(()) => {}
+                Err(message) => {
+                    // 封装失败不该把画面一起废掉：MP4 本身是完整可播的
+                    log_line(&format!("[record] 音频封装失败：{message}"));
                 }
             }
-            let _ = std::fs::remove_file(&wav);
+            for track in &tracks {
+                let _ = std::fs::remove_file(track);
+            }
         }
         // 真实帧率要把「补齐用的重复帧」剔掉，否则会虚高。
         let real_frames = frames.saturating_sub(self.repeats);
@@ -383,6 +383,79 @@ impl Encoder {
             backend: self.backend,
         })
     }
+}
+
+/// WAV 是不是真有数据（空文件或只有个头的不算）。
+fn wav_ready(path: impl AsRef<std::path::Path>) -> bool {
+    std::fs::metadata(path.as_ref())
+        .map(|meta| meta.len() > 2048)
+        .unwrap_or(false)
+}
+
+/// 按 WAV 头算实际录音时长。采样率、声道、位深都从头里读，不假定 48k 单声道——
+/// 麦克风那条是 ffmpeg 写的 48k/mono/16，系统声那条是 WASAPI 混音格式，可能 44.1k 立体声。
+fn wav_seconds(path: &str) -> Option<f64> {
+    use std::io::Read;
+    let total = std::fs::metadata(path).ok()?.len();
+    let mut head = [0u8; 44];
+    std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
+    let channels = u16::from_le_bytes([head[22], head[23]]) as f64;
+    let rate = u32::from_le_bytes([head[24], head[25], head[26], head[27]]) as f64;
+    let bits = u16::from_le_bytes([head[34], head[35]]) as f64;
+    if rate <= 0.0 || channels <= 0.0 || bits <= 0.0 {
+        return None;
+    }
+    let bytes = total.saturating_sub(44) as f64;
+    Some(bytes / (rate * channels * bits / 8.0))
+}
+
+/// 把音轨封装进成片：1 条直接 map；2 条（麦克风 + 系统声）先 amix 再封装。
+/// 每条都按「比画面多录了多久」裁头，尾部交给 -shortest 追齐。
+fn mux_tracks(ffmpeg: &str, video: &str, tracks: &[String], video_secs: f64) -> Result<(), String> {
+    let tmp = format!("{video}.mux.mp4");
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i", video]);
+    for track in tracks {
+        let lead = wav_seconds(track)
+            .map(|secs| (secs - video_secs).clamp(0.0, 3.0))
+            .unwrap_or(0.0);
+        if lead > 0.05 {
+            cmd.args(["-ss", &format!("{lead:.3}")]);
+        }
+        cmd.args(["-i", track]);
+    }
+    if tracks.len() >= 2 {
+        cmd.args([
+            "-filter_complex",
+            "[1:a][2:a]amix=inputs=2:duration=longest[aout]",
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+        ]);
+    } else {
+        cmd.args(["-map", "0:v:0", "-map", "1:a:0"]);
+    }
+    cmd.args([
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        &tmp,
+    ]);
+    let status = cmd.status().map_err(|e| format!("起 FFmpeg 封装失败：{e}"))?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("封装退出码 {status}"));
+    }
+    std::fs::remove_file(video).map_err(|e| format!("替换原片失败：{e}"))?;
+    std::fs::rename(&tmp, video).map_err(|e| format!("替换原片失败：{e}"))?;
+    Ok(())
 }
 
 /// 从整屏 RGBA 里裁出选区。坐标是相对该显示器的左上角。

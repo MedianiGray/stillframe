@@ -295,11 +295,13 @@ export async function nativeStartRecording(
   rect: { x: number; y: number; width: number; height: number },
   fps = 30,
   mic = false,
+  system = false,
 ): Promise<string | null> {
   const invoke = desktopInvoke();
   if (!invoke) return null;
   // mic 默认 false：录进别人的声音不是小事，只有用户点了麦克风开关才采
-  const path = await invoke('start_recording', { rect, fps, mic });
+  // system 同理：系统声走 WASAPI 环回，也要开关打开才采
+  const path = await invoke('start_recording', { rect, fps, mic, system });
   return typeof path === 'string' ? path : null;
 }
 

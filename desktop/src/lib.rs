@@ -13,20 +13,16 @@ use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 
 mod recorder;
 
+use recorder::log_line;
+
 #[cfg(windows)]
 mod win_capture;
 
+#[cfg(windows)]
+mod win_audio;
+
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
-}
-
-/// GUI 子系统没有控制台，eprintln 看不见；把关键诊断落到临时目录，方便现场排查。
-fn log_line(message: &str) {
-    use std::io::Write;
-    let path = std::path::PathBuf::from("C:\\Users\\35342\\AppData\\Local\\Temp\\stillframe-boot.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{message}");
-    }
 }
 
 fn decode_data_url(data: &str) -> Result<Vec<u8>, String> {
@@ -716,6 +712,7 @@ fn record_loop(
     out: std::path::PathBuf,
     ffmpeg: String,
     audio: Option<String>,
+    system: bool,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     seconds_limit: Option<f64>,
 ) -> Result<recorder::RecordingStats, String> {
@@ -737,6 +734,13 @@ fn record_loop(
     }
 
     let codec = pick_encoder(&ffmpeg);
+    // 系统声：WASAPI 环回采到 WAV，和麦克风那条并行。设备打不开就退成没有系统声。
+    let system_handle = if system {
+        let wav = std::path::PathBuf::from(format!("{}.sys.wav", out.to_string_lossy()));
+        win_audio::start(&wav).ok()
+    } else {
+        None
+    };
     let mut encoder = recorder::Encoder::start(&recorder::EncoderSpec {
         width,
         height,
@@ -748,9 +752,17 @@ fn record_loop(
         preset: "ultrafast",
         codec,
         audio: audio.clone(),
+        system_audio: system_handle.as_ref().map(|handle| handle.path().to_path_buf()),
     })?;
     let audio_tag = if audio.is_some() { "+mic" } else { "" };
-    encoder.set_backend(format!("{}+{}{}", grabber.backend(), codec, audio_tag));
+    let system_tag = if system_handle.is_some() { "+sys" } else { "" };
+    encoder.set_backend(format!(
+        "{}+{}{}{}",
+        grabber.backend(),
+        codec,
+        audio_tag,
+        system_tag
+    ));
 
     let started = std::time::Instant::now();
     loop {
@@ -771,10 +783,11 @@ fn record_loop(
         pace_frame(&mut encoder, frame, started, fps)?;
     }
     // 尾巴补齐：按真实跑秒数把缺的帧补上，避免成片比实际录制短
-    // 先把结束时刻钉住：补帧和等 FFmpeg 收尾都要花时间，不能算进录制时长
-    // 尾巴补齐：按真实跑秒数把缺的帧补上，避免成片比实际录制短
-    // 时间要先取：mark_end 里停麦克风最多要等半秒，算进去会多补十几帧。
+    // 时间要先取：停麦克风 / 停环回最多要等半秒，算进去会多补十几帧。
     let elapsed = started.elapsed().as_secs_f64();
+    if let Some(handle) = system_handle {
+        handle.stop();
+    }
     encoder.mark_end();
     log_line(&format!(
         "[record] frames={} elapsed={elapsed:.3} fps={fps} budget={:.0} backend={}",
@@ -796,6 +809,7 @@ fn record_loop(
     out: std::path::PathBuf,
     ffmpeg: String,
     _audio: Option<String>,
+    _system: bool,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     seconds_limit: Option<f64>,
 ) -> Result<recorder::RecordingStats, String> {
@@ -832,6 +846,7 @@ fn record_loop(
         preset: "veryfast",
         codec: "libx264",
         audio: None,
+        system_audio: None,
     })?;
 
     let started = std::time::Instant::now();
@@ -895,6 +910,7 @@ fn start_recording(
     fps: Option<u32>,
     ffmpeg: Option<String>,
     mic: Option<bool>,
+    system: Option<bool>,
 ) -> Result<String, String> {
     let mut slot = recording_slot().lock().map_err(err)?;
     if slot.is_some() {
@@ -920,7 +936,16 @@ fn start_recording(
         None
     };
     let handle = std::thread::spawn(move || {
-        record_loop(rect, fps, thread_out, ffmpeg_bin, audio, thread_stop, None)
+        record_loop(
+            rect,
+            fps,
+            thread_out,
+            ffmpeg_bin,
+            audio,
+            system.unwrap_or(false),
+            thread_stop,
+            None,
+        )
     });
     *slot = Some(Recording { stop, handle });
     Ok(out.to_string_lossy().to_string())
@@ -966,6 +991,8 @@ pub fn run() {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         // 可选：--probe-audio —— 同时采麦克风，验证音轨能不能进成片
         let probe_audio = std::env::args().any(|arg| arg == "--probe-audio");
+        // 可选：--probe-system —— 同时采系统声（WASAPI 环回），验证系统声能不能进成片
+        let probe_system = std::env::args().any(|arg| arg == "--probe-system");
         let ffmpeg_bin = resolve_ffmpeg(None);
         let audio = if probe_audio {
             pick_microphone(&ffmpeg_bin).filter(|device| microphone_works(&ffmpeg_bin, device))
@@ -978,6 +1005,7 @@ pub fn run() {
             std::path::PathBuf::from(&out),
             ffmpeg_bin,
             audio,
+            probe_system,
             stop,
             Some(seconds),
         );

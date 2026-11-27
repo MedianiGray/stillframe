@@ -78,7 +78,24 @@
   - `sleep(3ms)` 在 Windows 上常常只睡 1–2ms，每帧欠一点、帧率就抬到 31 → 剩 2ms 以内改为忙等到点。
   - 补帧用的时长要在停麦克风之前取：`mark_end` 里等音频退出最多半秒，算进去会多补十几帧。
 - **复验数据**：无麦克风 1280×720×60 秒 → 1800 帧 / `duration=60.000000` / 29.8fps / 丢帧 0；带麦克风 1920×1080×30 秒 → 900 帧 / 29.933 秒 / 29.5fps / 音频 aac 29.999 秒；带麦克风 15 秒 → 450 帧 / 14.967 秒 / 29.0fps。`--probe-audio` 是标定开关。
-- **系统声还没接**：本机 `ffmpeg -f dshow` 只有麦克风阵列，没有立体声混音端点，得走 WASAPI 环回（`IAudioClient` loopback + `IAudioCaptureClient` → WAV → 封装），留下一批。
+- **系统声还没接**：本机 `ffmpeg -f dshow` 只有麦克风阵列，没有立体声混音端点，得走 WASAPI 环回——见下一批。
+
+## v0.3 第五批：系统声也来了（WASAPI 环回）（2026-11-27）
+
+麦克风那格做完，录屏条上另一个声音开关是「系统声音」——录课件视频、录别人共享的网页，要的是扬声器里正在放的声音。
+
+- **FFmpeg 这条路走不通，就先确认到底哪不通**：`ffmpeg -hide_banner -devices` 只有 `dshow` 与 `openal`，`-f wasapi` 直接报 `Unknown input format`；`-f dshow -list_devices` 只有「Integrated Camera」与「麦克风阵列」，**没有立体声混音**。所以不是配置问题，是官方构建根本没这能力。
+- **自写 `desktop/src/win_audio.rs` 走 WASAPI 环回**：`MMDeviceEnumerator` → 默认渲染端点（`eRender/eConsole`）→ `IAudioClient` → `GetMixFormat()` 拿真实混音格式（44.1k/48k、立体声、32 位浮点，都按头里的字段来，不写死）→ `Initialize(AUDCLNT_STREAMFLAGS_LOOPBACK)` → `IAudioCaptureClient` 每 10ms 读一次包，混成单声道 16 位写 WAV；停止时 `Stop()` 并回填 RIFF / data 长度，文件才自洽可读。
+- **零拷贝降混**：混音格式基本是 32 位浮点，直接按 `f32` 切片多声道取平均（比只取第一声道更接近听感），`AUDCLNT_BUFFERFLAGS_SILENT` 的包标记为静音写零，不误当真实数据。
+- **接口失败就退回**：`start()` 用 mpsc 等初始化结果（8 秒超时），设备打不开（无默认播放设备 / 客户端拒绝）立即返回错误，录制静默退回纯画面，`backend` 里没有 `+sys` 就是没采到。句柄带 `Drop` 兜底，异常路径也会 `Stop()`。
+- **两路音源可同时**：`EncoderSpec` 加 `system_audio`，收尾时把 0/1/2 条音轨收一起——1 条直接 `-map 1:a:0`；2 条用 `-filter_complex "[1:a][2:a]amix=inputs=2:duration=longest[a]"` 合成一条 AAC。每条音轨都按自己的 WAV 头算时长、裁掉比画面多出的头，尾部 `-shortest` 追齐。封装失败只留日志，不废掉画面（MP4 本身完整可播）。
+- **空数据不留痕**：WAV 不足 2KB（只有 44 字节头、环回一个包都没出）就删掉，不给成片塞空音轨，也不在录制目录留 0 字节文件。
+- **真机验收**：
+  - 720p×20 秒 + 系统声，同时 `ffplay` 放 440Hz 正弦 → `backend=dxgi+h264_qsv+sys`，600 帧 / 20.01 秒 / 28.8fps，成片音轨 aac 19.816 秒、`mean_volume -5.0 dB`（确实采到了声音，不是静音）。
+  - 麦克风 + 系统声同时开 → `backend=dxgi+h264_qsv+mic+sys`，450 帧 / **15.000000 秒** / 29.1fps，成片单条 AAC 15.000 秒 705 帧，`mean_volume -10.2 dB`。
+  - 系统声开关打开但设备**全程没出声** → 成片没有音轨（环回不产出包，按上面的规则删掉），画面 `duration=10.000000`、300 帧不受影响。
+- **接线**：`start_recording(rect, fps, ffmpeg, mic, system)`；前端 `nativeStartRecording(rect, fps, mic, system)` 透传 `soundOn`；桌面壳里系统声按钮直接 toggle（不再提示「等下一批」），开始录制时 toast 点名采了哪几路（「采麦克风 + 系统声」）；`--probe-system` 是新的标定开关，可与 `--probe-audio` 叠加。
+- **顺手把日志收口**：`log_line` 从 `lib.rs` 挪进 `recorder.rs` 并改为读 `LOCALAPPDATA`，这样 `tools/recorder-check` 单独编译这份代码时不再因找不到 crate 根函数失败（原先是 `crate::log_line`）。
 
 ## v0.3 第二批：桌面录制改走原生 30 帧管线（2026-11-27）
 
