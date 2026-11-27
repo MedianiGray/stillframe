@@ -26,4 +26,21 @@ describe('取字段落归并', () => {
     expect(groupParagraphs([box('   ', 0, 0), box('有效文字', 40, 100)])).toEqual(['有效文字']);
     expect(groupParagraphs([])).toEqual([]);
   });
+
+  it('并排双栏各归各段，按栏读而不是按行横着串', () => {
+    // 左右两栏在同一水平带上交错，行序一混就会读成「左一右一左二右二」这种怪句
+    const rows = [
+      box('左栏第一行', 40, 100),
+      box('右栏参数一', 500, 104),
+      box('左栏第二行', 40, 120),
+      box('右栏参数二', 500, 124),
+      box('左栏第三行', 40, 140),
+    ];
+    expect(groupParagraphs(rows)).toEqual(['左栏第一行左栏第二行左栏第三行', '右栏参数一右栏参数二']);
+  });
+
+  it('居中标题不当成第二栏，顺序仍在最前', () => {
+    const rows = [box('大标题', 300, 60), box('正文第一行', 40, 120), box('正文第二行', 40, 140)];
+    expect(groupParagraphs(rows)).toEqual(['大标题', '正文第一行正文第二行']);
+  });
 });

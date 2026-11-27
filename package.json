@@ -10,7 +10,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run tests",
     "test:e2e": "playwright test",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "ocr-bench:pages": "python tools/ocr-bench/make-pages.py",
+    "ocr-bench": "esbuild src/lib/paragraphs.ts src/lib/columns.ts --format=esm --outdir=tools/ocr-bench/lib && node tools/ocr-bench/bench.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

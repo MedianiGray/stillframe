@@ -62,3 +62,6 @@ _devlog*.txt
 .env.local
 .env.*.local
 tools/*/target/
+
+tools/ocr-bench/lib/
+tools/ocr-bench/pages/ppm/
