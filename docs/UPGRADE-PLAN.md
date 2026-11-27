@@ -65,7 +65,7 @@
 | 12 款滤镜名称与顺序 | src/lib/filters.ts | 名称对齐，观感近似 |
 | 132×152 放大镜、尺寸与 RGB | src/components/SelectionOverlay.tsx | 已实现 |
 | 长截图条、纵横两个方向、手动重叠 | ScrollPanel.tsx、src/lib/stitch.ts | 已实现，自动滚动仅入口 |
-| 录屏六件套与标注入片 | RecordPanel.tsx、src/lib/recorder.ts | 已实现 |
+| 录屏六件套与标注入片 | RecordPanel.tsx、src/lib/recorder.ts、desktop/src/win_annot.rs | 已实现（网页端画进 canvas 流，桌面端逐帧 GDI 烧进画面） |
 | 识图与翻译 540×440 双窗 | OcrPanel.tsx、TranslatePanel.tsx | 已实现 |
 | 贴图 600×500 置顶窗口 | desktop/src/lib.rs | 桌面端已实现 |
 | 隐藏自身窗口、全局热键 | desktop/src/lib.rs | 桌面端已实现 |
@@ -160,6 +160,7 @@
 | --- | --- | --- |
 | 桌面录制管线 | xcap 抓帧线程、FFmpeg 编码、MP4 输出 | 1080p 连续录制 60 秒，实测不低于 28 帧，丢帧率低于 2% |
 | 声音链路 | WASAPI 系统声 + 麦克风两路采集与封装，开关随录随生效 | 成片音轨可辨、无空音轨，音画偏差 <100ms |
+| 标注进成片 | 录屏条六件套（含撤销/清除）逐帧合成进原生成片 | 抽帧能看到标注按时间顺序出现，无标注时帧开销不上升，成片丢帧 <2% |
 | 自动滚动 | Windows 滚轮注入、停止检测、失败回退手动 | 列表页 20 屏拼接成功率不低于 90% |
 | 移动端优化 | 前台服务、手势选区、分享 Intent | Android 12 与 14 真机各通过一轮 |
 | 性能基线 | 脏矩形重绘、ImageBitmap、分块拼接 | 4K 截图内存峰值不超过 400MB |
@@ -182,7 +183,7 @@
 - 设计取舍：先抓一帧量尺寸并当首帧，首帧到了才开编码；选区宽高偶数化；掉帧不补、只如实计数；无音频时显式 `-an`（音频于第四批接通，做法见 §5.2 实施修订）。
 - 已验（Linux）：90 帧合成画面 → `ffprobe` 核对 h264 / 320×240 / `nb_frames=90` / `duration=3.000000`，裁剪长度与预期一致。
 - 未验：Windows 真机 1080p×60 秒帧率（目标 ≥28fps、丢帧 <2%）——需要在 Windows 上编译并跑真机，当前 GUI 会话桌面全黑的限制不影响录制（录制由 `xcap` + FFmpeg 走，不经 GUI 截图路径），下一轮补。
-- 未做：录屏标注进成片、FFmpeg sidecar 随包分发（现依赖 PATH 或显式传路径）。音频在第四批（麦克风）与第五批（系统声）接通，见 §5.2。
+- 未做（当时）：FFmpeg sidecar 随包分发（现依赖 PATH 或显式传路径）。音频在第四批（麦克风）与第五批（系统声）接通、标注在第六批接通，见 §5.2。
 
 **v0.3 录制第二批：Windows 真机达标 + DXGI 抓帧（2026-11-27）**
 
@@ -208,8 +209,15 @@
 - **指标结论**：1080p×60 秒三轮均值 28.3fps、丢帧均 <1%，达到「≥28fps、丢帧 <2%」。输出恒为 30fps CFR，`fps` 报的是内容更新率（静止时 DXGI 不给新帧，用上一帧顶住时间轴）。
 - 其余关键修复：`timeBeginPeriod(1)`（Windows 默认定时器粒度 15.6ms 会把 `sleep(33ms)` 拉成 46ms）；落后节拍时重复帧补时间轴 + 收尾 `pad_to`，否则慢于目标帧率时成片会快放（修前实测 60 秒录成 47 秒）；`SelectObject` 句柄失效自动重建，锁屏 / 远程重连不再断录。
 - 回退链：DXGI 建不起来（旧卡 / 会话不支持 / 驱动拒绝）自动退 `BitBlt`，`h264_qsv` 不可用自动退 `libx264`，两条都在 `backend` 字段里可查（如 `gdi+libx264`）。
-- 仍未做：录屏标注进成片、FFmpeg sidecar 随包分发。声音链路已在第四、五批接通（麦克风独立进程 + WASAPI 环回，两路可同时）。
+- 仍未做：FFmpeg sidecar 随包分发、4K 内存峰值与脏矩形优化。声音链路已在第四、五批接通（麦克风独立进程 + WASAPI 环回，两路可同时），录屏标注在第六批逐帧合成进成片。
 - 旁证：本机 `tools/recorder-check`（CI 同款断言）跑通——`codec_name=h264 / 320x240 / nb_frames=90 / duration=3.000000`，说明编码链在改动后仍可脱离 GUI 复验。
+
+**v0.3 录制第六批：录屏标注进成片（2026-11-27）**
+
+- 交付物：`desktop/src/win_annot.rs`（DIB 离屏画布 + GDI 绘制 + `has_activity` / `draw` / `pixels`）、`lib.rs` 的标注快照槽与三条命令（`push_record_annotation` / `push_record_laser` / `undo_record_annotation` / `clear_record_annotation`）、`record_loop` 每帧合成、`--probe-annot=<json>` 标定入口、前端 `toNativeAnnotation()` + `RecordPanel` 推送。
+- 设计要点：抓帧缓冲本来就是 BGRA，直接 `memcpy` 进 32 位 top-down DIB，绘制与编码共用同一块像素；没有活动标注就不碰 DIB（零成本）；坐标 / 线宽 / 字号统一归一化，避免 DPI 换算。
+- 真机验收：1280×720 × 12 秒、5 条标注（1s 方框 / 2s 椭圆 / 3s 箭头 / 4s 画笔 / 5s 中文文字）→ `frames=360 seconds=12 dropped=0`，`write_avg_ms` 2.3（无标注）→ 3.8（带标注）；抽帧 2s / 4s / 6s 逐条按序出现，中文字逐字正确。
+- 未做：GDI 抗锯齿（需换 Direct2D/Skia）、标注拖拽微调、激光透明度（现在是收缩红点）。
 
 ### 4.3 v1.0 发布与治理
 
@@ -268,6 +276,14 @@
 > 真机：720p×20 秒 + 系统声（同放 440Hz 正弦）→ `dxgi+h264_qsv+sys`、600 帧 / 20.01 秒 / 28.8fps、音轨 19.816 秒、`mean_volume -5.0 dB`；两路同开 → `dxgi+h264_qsv+mic+sys`、450 帧 / 15.000000 秒、单条 AAC 705 帧。全程无播放时成片无音轨、画面照常完整。
 >
 > 边界写进 README：环回采的是默认播放设备的渲染内容，录制期间没播就没音轨；远程/无播放设备的会话要按这个前提验收。
+>
+> **标注进成片落地（2026-11-27 录制第六批）**：原方案「标注层仍在 canvas 合成」对桌面壳不成立——桌面端的帧根本不进 canvas，WebView 里那套绘制碰不到 Rust 的抓帧缓冲。于是反过来：**前端只推事件，后端逐帧烧**。新增 `desktop/src/win_annot.rs`，抓帧器交出的 BGRA 直接拷进一块 32 位 top-down DIB，再用 GDI 画矩形（5 点闭合折线）、椭圆（48 边形）、箭头（线 + 实心三角）、文字（`Microsoft YaHei UI` + `TextOutW`，行距 1.28）、激光（随时间收缩的红点，1.2 秒残影）。
+>
+> 坐标、线宽、字号全部由前端按选区归一化到 `0..1`，后端按帧尺寸乘回来，DPI 与非整数缩放都不用额外换算；`atMs` 以开始录制为原点。前端在标注落定即推（`push_record_annotation`）、激光按 40ms 节流推（`push_record_laser`），撤销 / 清除各有命令同步到后端，只影响后续帧。
+>
+> 零成本跳过：一条活动标注都没有的帧不碰 DIB，直接喂原始缓冲。真机 1280×720×12 秒 5 条标注 → 360 帧 / 12.000 秒 / 丢帧 0，`write_avg_ms` 2.3 → 3.8（每帧多 1.5ms），抽帧核对 1s/2s/3s/4s/5s 五条按序出现。验收手段是 `--probe-annot=<json>` 预置标注。
+>
+> 取舍：GDI 无抗锯齿、标注不可再选中拖拽。要更细腻需换 Direct2D/Skia 后端，列为后续项。
 
 
 验收：1080p 连续 60 秒，实测帧率不低于 28，成片在系统播放器中正常播放，音画偏差小于 100 毫秒。

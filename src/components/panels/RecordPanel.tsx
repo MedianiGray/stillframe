@@ -18,7 +18,7 @@ import {
   Zap,
 } from 'lucide-react';
 import type { Rect } from '../../lib/types';
-import { snapAngle, squareRect } from '../../lib/annotate';
+import { snapAngle, squareRect, toNativeAnnotation } from '../../lib/annotate';
 import type { ScreenSession } from '../../lib/capture';
 import { RegionRecorder } from '../../lib/recorder';
 import { downloadBlob, timestampName } from '../../lib/image';
@@ -27,8 +27,12 @@ import { writeToDirectory } from '../../lib/autosave';
 import { QQ_TEXT } from '../../lib/qqspec';
 import {
   hostKind,
+  nativeClearAnnotation,
+  nativePushAnnotation,
+  nativePushLaser,
   nativeStartRecording,
   nativeStopRecording,
+  nativeUndoAnnotation,
   type NativeRecordingStats,
 } from '../../lib/desktop';
 import { useToast } from '../Toasts';
@@ -67,6 +71,10 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
   const rafRef = useRef(0);
   const micRef = useRef<MediaStream | null>(null);
   const dragRef = useRef<{ a: Pt; kind: RecTool } | null>(null);
+  /** 原生录制的起算时刻：标注的 atMs 都相对它，和成片的第一帧对得上。 */
+  const nativeClockRef = useRef(0);
+  /** 激光点推送节流，别把指针事件一条不落地塞给桌面壳。 */
+  const laserPushRef = useRef(0);
 
   const [recording, setRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
@@ -271,6 +279,8 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
         setNativeDone(null);
         setNativeRecording(true);
         setRecording(true);
+        // 标注的时间基准跟着开始录制走，和第一帧对齐
+        nativeClockRef.current = performance.now();
         // 声音来源分开报，别一律说成「有声」，参数在 backend 里也看得见
         const sources = [voiceOn ? '麦克风' : '', soundOn ? '系统声' : ''].filter(Boolean);
         toast(
@@ -308,6 +318,8 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
         const stats = await nativeStopRecording();
         setNativeRecording(false);
         setRecording(false);
+        // 录完了就不再往后端推标注，避免下一段录制被上一段的笔迹串进来
+        nativeClockRef.current = 0;
         if (!stats) throw new Error('没有拿到录制结果');
         setNativeDone(stats);
         const droppedNote = stats.dropped ? `，补 ${stats.dropped} 帧` : '';
@@ -319,6 +331,7 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
       } catch (error) {
         setNativeRecording(false);
         setRecording(false);
+        nativeClockRef.current = 0;
         toast(error instanceof Error ? error.message : '停止录制失败', 'warn');
       }
       return;
@@ -364,12 +377,32 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
     };
   };
 
+  /**
+   * 标注一落定就推给桌面壳：坐标、线宽、字号统一归一化，
+   * 后端按帧尺寸乘回来，DPI 缩放和整数缩放都不用单独换算。
+   */
+  const pushNativeAnn = (item: RecAnn) => {
+    if (!nativeCapable || !nativeClockRef.current) return;
+    const payload = toNativeAnnotation(item, w, h, performance.now() - nativeClockRef.current);
+    void nativePushAnnotation(payload);
+  };
+
+  /** 激光点：40ms 一次就够画出连贯的尾巴，别把指针事件一条不落地塞给桌面壳。 */
+  const pushNativeLaser = (p: Pt, force = false) => {
+    if (!nativeCapable || !nativeClockRef.current) return;
+    const now = performance.now();
+    if (!force && now - laserPushRef.current < 40) return;
+    laserPushRef.current = now;
+    void nativePushLaser(p.x / w, p.y / h, now - nativeClockRef.current);
+  };
+
   const onDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (event.button !== 0) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const p = toPoint(event);
     if (tool === 'laser') {
       setLaser((prev) => [...prev.slice(-40), { x: p.x, y: p.y, t: performance.now() }]);
+      pushNativeLaser(p, true);
       return;
     }
     if (tool === 'text') {
@@ -386,6 +419,7 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
     const p = toPoint(event);
     if (tool === 'laser' && event.buttons === 1) {
       setLaser((prev) => [...prev.slice(-40), { x: p.x, y: p.y, t: performance.now() }]);
+      pushNativeLaser(p);
       return;
     }
     const drag = dragRef.current;
@@ -426,6 +460,8 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
     if ('points' in current && current.points.length < 2) return;
     if ('b' in current && Math.hypot(current.b.x - current.a.x, current.b.y - current.a.y) < 4) return;
     setAnns((prev) => [...prev, { ...current, id: `r${prev.length + 1}` } as RecAnn]);
+    // 边录边推：桌面壳按 atMs 决定这条从第几帧开始出现，不用等录完再合成
+    pushNativeAnn(current);
   };
 
   return (
@@ -454,10 +490,16 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
                 onKeyDown={(e) => {
                   if (e.key === 'Escape') setTextDraft(null);
                   if (e.key === 'Enter' && textDraft.value.trim()) {
-                    setAnns((prev) => [
-                      ...prev,
-                      { id: `t${prev.length + 1}`, kind: 'text', color, size: 18, pos: textDraft.pos, text: textDraft.value.trim() },
-                    ]);
+                    const item: RecAnn = {
+                      id: `t${anns.length + 1}`,
+                      kind: 'text',
+                      color,
+                      size: 18,
+                      pos: textDraft.pos,
+                      text: textDraft.value.trim(),
+                    };
+                    setAnns((prev) => [...prev, item]);
+                    pushNativeAnn(item);
                     setTextDraft(null);
                   }
                 }}
@@ -510,10 +552,30 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
 
             <span className="mx-1 h-[16px] w-px bg-white/15" />
 
-            <button type="button" title="撤销" className={BTN} disabled={!anns.length} onClick={() => setAnns((prev) => prev.slice(0, -1))}>
+            <button
+              type="button"
+              title="撤销"
+              className={BTN}
+              disabled={!anns.length}
+              onClick={() => {
+                setAnns((prev) => prev.slice(0, -1));
+                // 成片里后面的帧也得跟着撤，否则画布上没了、片子里还挂着
+                if (nativeRecording) void nativeUndoAnnotation();
+              }}
+            >
               <Undo2 size={16} strokeWidth={1.7} />
             </button>
-            <button type="button" title={QQ_TEXT.clear} className={BTN} disabled={!anns.length} onClick={() => setAnns([])}>
+            <button
+              type="button"
+              title={QQ_TEXT.clear}
+              className={BTN}
+              disabled={!anns.length}
+              onClick={() => {
+                setAnns([]);
+                setLaser([]);
+                if (nativeRecording) void nativeClearAnnotation();
+              }}
+            >
               <Eraser size={16} strokeWidth={1.7} />
             </button>
 

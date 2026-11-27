@@ -21,6 +21,9 @@ mod win_capture;
 #[cfg(windows)]
 mod win_audio;
 
+#[cfg(windows)]
+mod win_annot;
+
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -570,6 +573,100 @@ fn recording_slot() -> &'static std::sync::Mutex<Option<Recording>> {
     RECORDING.get_or_init(|| std::sync::Mutex::new(None))
 }
 
+// ---- 录屏标注：前端把落定的标注与激光轨迹推进来，录制线程每帧取快照合成 ----
+
+/// 当前这一段录像的标注清单（按出现时刻排进成片，已撤销的不再推）。
+static RECORD_ANNS: std::sync::OnceLock<std::sync::Mutex<Vec<win_annot_any::AnnotItem>>> =
+    std::sync::OnceLock::new();
+
+fn record_ann_slot() -> &'static std::sync::Mutex<Vec<win_annot_any::AnnotItem>> {
+    RECORD_ANNS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 激光轨迹（只留最近一小段，画成渐隐的点）。
+static RECORD_LASER: std::sync::OnceLock<std::sync::Mutex<Vec<win_annot_any::LaserItem>>> =
+    std::sync::OnceLock::new();
+
+fn record_laser_slot() -> &'static std::sync::Mutex<Vec<win_annot_any::LaserItem>> {
+    RECORD_LASER.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// 跨平台的承载类型：Windows 下就是 GDI 绘制用的那份结构，别处只做占位。
+mod win_annot_any {
+    #[cfg(windows)]
+    pub use super::win_annot::{LaserPoint as LaserItem, RecAnnotation as AnnotItem};
+
+    #[cfg(not(windows))]
+    #[derive(Clone, Default)]
+    pub struct AnnotItem {
+        pub at_ms: f64,
+    }
+
+    #[cfg(not(windows))]
+    #[derive(Clone, Default)]
+    pub struct LaserItem {
+        pub x: f32,
+        pub y: f32,
+        pub at_ms: f64,
+    }
+}
+
+fn clear_record_annotations() {
+    if let Ok(mut list) = record_ann_slot().lock() {
+        list.clear();
+    }
+    if let Ok(mut list) = record_laser_slot().lock() {
+        list.clear();
+    }
+}
+
+/// 标注落定（松开鼠标 / 定稿文字）时推一条：坐标、线宽、字号都由前端归一化。
+#[tauri::command]
+fn push_record_annotation(annotation: serde_json::Value) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let item: win_annot::RecAnnotation =
+            serde_json::from_value(annotation).map_err(|e| format!("标注格式不对：{e}"))?;
+        let mut list = record_ann_slot().lock().map_err(err)?;
+        // 一段录像里标注数量有天花板，超了丢最老的，防止长时间录制无限吃内存。
+        if list.len() >= 256 {
+            list.remove(0);
+        }
+        list.push(item);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = annotation;
+    }
+    Ok(())
+}
+
+/// 撤销一条标注：画布上撤了，成片后面的帧也就不该再画它。
+/// 已经录进去的帧保持原样——录像没法倒着改。
+#[tauri::command]
+fn undo_record_annotation() -> Result<(), String> {
+    if let Ok(mut list) = record_ann_slot().lock() {
+        list.pop();
+    }
+    Ok(())
+}
+
+/// 清空所有标注（画布「清除」按钮）。
+#[tauri::command]
+fn clear_record_annotation() -> Result<(), String> {
+    clear_record_annotations();
+    Ok(())
+}
+
+/// 激光笔移动：只留最近 1.5 秒的点，画成一路渐隐的红点。
+#[tauri::command]
+fn push_record_laser(x: f32, y: f32, at_ms: f64) -> Result<(), String> {
+    let mut list = record_laser_slot().lock().map_err(err)?;
+    list.push(win_annot_any::LaserItem { x, y, at_ms });
+    list.retain(|point| at_ms - point.at_ms <= 1600.0);
+    Ok(())
+}
+
 /// 抓帧循环：先抓一帧量尺寸、顺便当首帧（首帧到了才启动编码，避免片头空白），
 /// 之后按目标间隔抓屏、裁剪、写进编码器。落后三帧以上就重设基准，不做追赶式狂抓。
 /// 挑编码器：能跑 h264_qsv 就用核显，把 CPU 留给抓帧；不行再回退 libx264。
@@ -702,6 +799,23 @@ fn microphone_works(ffmpeg: &str, device: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 每帧取一次标注快照。条目不多（上限 256），拷一份比长期持锁更省心。
+#[cfg(windows)]
+fn snapshot_record_annotations() -> (
+    Vec<win_annot_any::AnnotItem>,
+    Vec<win_annot_any::LaserItem>,
+) {
+    let anns = record_ann_slot()
+        .lock()
+        .map(|list| list.clone())
+        .unwrap_or_default();
+    let laser = record_laser_slot()
+        .lock()
+        .map(|list| list.clone())
+        .unwrap_or_default();
+    (anns, laser)
+}
+
 /// Windows 专用抓帧循环：直接 BitBlt 到 DIB 缓冲，像素零拷贝交给 FFmpeg。
 /// 实测 xcap 的 `capture_image` 在本机 1080p 下约 256ms/帧（3.9fps），
 /// 换成 BitBlt 后每帧约 33ms，才够 30 帧的预算。
@@ -765,6 +879,9 @@ fn record_loop(
     ));
 
     let started = std::time::Instant::now();
+    // 标注画布：抓帧缓冲本来就是 BGRA，拷进 32 位 DIB 后直接用 GDI 画，
+    // 没有标注活动时整段跳过，不白拷一遍像素。
+    let mut layer = win_annot::Layer::new(width, height).ok();
     loop {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
             break;
@@ -779,8 +896,21 @@ fn record_loop(
         let t0 = std::time::Instant::now();
         let frame = grabber.grab()?;
         encoder.note_grab(t0.elapsed());
-        encoder.push_frame(frame)?;
-        pace_frame(&mut encoder, frame, started, fps)?;
+        let now_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let (anns, laser) = snapshot_record_annotations();
+        let mut composed = false;
+        if let Some(canvas) = layer.as_mut() {
+            if win_annot::Layer::has_activity(&anns, &laser, now_ms) {
+                canvas.draw(frame, &anns, &laser, now_ms);
+                composed = true;
+            }
+        }
+        let pixels: &[u8] = match layer.as_ref() {
+            Some(canvas) if composed => canvas.pixels(),
+            _ => frame,
+        };
+        encoder.push_frame(pixels)?;
+        pace_frame(&mut encoder, pixels, started, fps)?;
     }
     // 尾巴补齐：按真实跑秒数把缺的帧补上，避免成片比实际录制短
     // 时间要先取：停麦克风 / 停环回最多要等半秒，算进去会多补十几帧。
@@ -917,6 +1047,8 @@ fn start_recording(
         return Err("已经在录制，先结束当前这段".to_string());
     }
     let fps = fps.unwrap_or(30).clamp(5, 60);
+    // 新的一段录像从空白标注开始：上一段画过的内容不能跟过来。
+    clear_record_annotations();
     let out = recorder::recordings_dir().join(format!(
         "录屏-{}.mp4",
         std::time::SystemTime::now()
@@ -993,6 +1125,33 @@ pub fn run() {
         let probe_audio = std::env::args().any(|arg| arg == "--probe-audio");
         // 可选：--probe-system —— 同时采系统声（WASAPI 环回），验证系统声能不能进成片
         let probe_system = std::env::args().any(|arg| arg == "--probe-system");
+        // 可选：--probe-annot=<json> —— 预置几条标注（坐标已归一化），验证标注能不能烧进成片
+        clear_record_annotations();
+        if let Some(path) = std::env::args().find_map(|arg| {
+            arg.strip_prefix("--probe-annot=")
+                .map(str::to_string)
+        }) {
+            #[cfg(windows)]
+            {
+                match std::fs::read_to_string(&path)
+                    .map_err(err)
+                    .and_then(|text| {
+                        serde_json::from_str::<Vec<win_annot::RecAnnotation>>(&text)
+                            .map_err(|e| format!("标注 JSON 读不懂：{e}"))
+                    }) {
+                    Ok(items) => {
+                        if let Ok(mut list) = record_ann_slot().lock() {
+                            *list = items;
+                        }
+                    }
+                    Err(e) => log_line(&format!("[probe] 标注预置失败：{e}")),
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = path;
+            }
+        }
         let ffmpeg_bin = resolve_ffmpeg(None);
         let audio = if probe_audio {
             pick_microphone(&ffmpeg_bin).filter(|device| microphone_works(&ffmpeg_bin, device))
@@ -1049,6 +1208,10 @@ pub fn run() {
             scroll_at,
             start_recording,
             stop_recording,
+            push_record_annotation,
+            push_record_laser,
+            undo_record_annotation,
+            clear_record_annotation,
             open_quick,
             close_quick,
             quick_action,

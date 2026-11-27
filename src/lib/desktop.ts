@@ -312,3 +312,67 @@ export async function nativeStopRecording(): Promise<NativeRecordingStats | null
   const stats = await invoke('stop_recording');
   return stats && typeof stats === 'object' ? (stats as NativeRecordingStats) : null;
 }
+
+/** 一条推进成片的标注。坐标、线宽、字号都已归一化到选区（0..1）。 */
+export interface NativeRecAnnotation {
+  kind: 'rect' | 'ellipse' | 'arrow' | 'pen' | 'text';
+  color?: string;
+  /** 线宽 / 选区宽。 */
+  width?: number;
+  /** 出现时刻，相对录制开始的毫秒。 */
+  atMs: number;
+  points?: [number, number][];
+  a?: [number, number];
+  b?: [number, number];
+  pos?: [number, number];
+  text?: string;
+  /** 字号 / 选区宽。 */
+  size?: number;
+}
+
+/**
+ * 把一条已落定的标注推进成片。桌面壳按 `atMs` 决定它从第几帧开始出现，
+ * 因此可以在录制中途随时画、随时推，不用等录完再合成。
+ */
+export async function nativePushAnnotation(item: NativeRecAnnotation): Promise<void> {
+  const invoke = desktopInvoke();
+  if (!invoke) return;
+  try {
+    await invoke('push_record_annotation', { annotation: item });
+  } catch {
+    // 标注进不了成片不该影响录制本身
+  }
+}
+
+/** 激光笔轨迹点：只留最近 1.5 秒，画成一路渐隐的红点。 */
+export async function nativePushLaser(x: number, y: number, atMs: number): Promise<void> {
+  const invoke = desktopInvoke();
+  if (!invoke) return;
+  try {
+    await invoke('push_record_laser', { x, y, atMs });
+  } catch {
+    // 同上：激光掉帧不影响画面录制
+  }
+}
+
+/** 撤销最后一条标注：成片后面的帧不再画它（已录进去的帧保持原样）。 */
+export async function nativeUndoAnnotation(): Promise<void> {
+  const invoke = desktopInvoke();
+  if (!invoke) return;
+  try {
+    await invoke('undo_record_annotation');
+  } catch {
+    // 忽略
+  }
+}
+
+/** 清空标注与激光残影。 */
+export async function nativeClearAnnotation(): Promise<void> {
+  const invoke = desktopInvoke();
+  if (!invoke) return;
+  try {
+    await invoke('clear_record_annotation');
+  } catch {
+    // 忽略
+  }
+}

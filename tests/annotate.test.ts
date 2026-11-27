@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { snapAngle, squareRect } from '../src/lib/annotate';
+import { snapAngle, squareRect, toNativeAnnotation } from '../src/lib/annotate';
 
 describe('squareRect', () => {
   it('正向斜拖取较长边变正方形', () => {
@@ -33,5 +33,58 @@ describe('snapAngle', () => {
 
   it('几乎没动时保持原位，不闪成奇怪方向', () => {
     expect(snapAngle({ x: 5, y: 5 }, { x: 5.3, y: 5.2 })).toEqual({ x: 5, y: 5 });
+  });
+});
+
+describe('toNativeAnnotation', () => {
+  const W = 1280;
+  const H = 720;
+
+  it('矩形按选区宽高归一化，线宽跟着宽走', () => {
+    const payload = toNativeAnnotation(
+      { kind: 'rect', color: '#FF3030', width: 5, a: { x: 128, y: 72 }, b: { x: 640, y: 360 } },
+      W,
+      H,
+      1000,
+    );
+    expect(payload).toEqual({
+      kind: 'rect',
+      color: '#FF3030',
+      width: 5 / W,
+      atMs: 1000,
+      a: [0.1, 0.1],
+      b: [0.5, 0.5],
+    });
+  });
+
+  it('画笔每个点都归一化，文字字号按宽归一化', () => {
+    const pen = toNativeAnnotation(
+      { kind: 'pen', color: '#7CFF6B', width: 3, points: [{ x: 0, y: 0 }, { x: 1280, y: 720 }] },
+      W,
+      H,
+      2000,
+    );
+    expect(pen.points).toEqual([[0, 0], [1, 1]]);
+
+    const text = toNativeAnnotation(
+      { kind: 'text', color: '#FFFFFF', size: 18, pos: { x: 128, y: 648 }, text: '标注进成片' },
+      W,
+      H,
+      3000,
+    );
+    expect(text.size).toBeCloseTo(18 / W, 10);
+    expect(text.pos).toEqual([0.1, 0.9]);
+    expect(text.text).toBe('标注进成片');
+  });
+
+  it('选区尺寸为 0 时不产生 Inf / NaN', () => {
+    const payload = toNativeAnnotation(
+      { kind: 'arrow', color: '#FFD400', width: 3, a: { x: 0, y: 0 }, b: { x: 12, y: 8 } },
+      0,
+      0,
+      0,
+    );
+    expect(Number.isFinite(payload.width)).toBe(true);
+    expect(payload.a?.every(Number.isFinite)).toBe(true);
   });
 });

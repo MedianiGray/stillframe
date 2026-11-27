@@ -1,6 +1,92 @@
 import { resolveSelection } from './selection';
 import type { Annotation, Point, Rect } from './types';
 
+/** 推进成片的标注：坐标、线宽、字号全部归一化到选区（0..1）。 */
+export interface NativeAnnotationPayload {
+  kind: 'rect' | 'ellipse' | 'arrow' | 'pen' | 'text';
+  color?: string;
+  /** 线宽 / 选区宽。 */
+  width?: number;
+  /** 出现时刻，相对录制开始的毫秒。 */
+  atMs: number;
+  points?: [number, number][];
+  a?: [number, number];
+  b?: [number, number];
+  pos?: [number, number];
+  text?: string;
+  /** 字号 / 选区宽。 */
+  size?: number;
+}
+
+/** 录屏画布上的标注（与截图编辑器同形，但坐标是选区的物理像素）。 */
+export type RecAnnLike =
+  | { kind: 'pen'; color: string; width: number; points: { x: number; y: number }[] }
+  | { kind: 'rect' | 'ellipse'; color: string; width: number; a: Point; b: Point }
+  | { kind: 'arrow'; color: string; width: number; a: Point; b: Point }
+  | { kind: 'text'; color: string; size: number; pos: Point; text: string };
+
+/**
+ * 画布标注 → 成片标注。用「除以选区宽高」而不是像素绝对值，
+ * 桌面壳那边的帧尺寸、DPI 缩放都不用在两个模块之间来回约定。
+ */
+export function toNativeAnnotation(
+  item: RecAnnLike,
+  width: number,
+  height: number,
+  atMs: number,
+): NativeAnnotationPayload {
+  const w = Math.max(1, width);
+  const h = Math.max(1, height);
+  const n = (p: Point): [number, number] => [p.x / w, p.y / h];
+  if (item.kind === 'pen') {
+    return {
+      kind: 'pen',
+      color: item.color,
+      width: item.width / w,
+      atMs,
+      points: item.points.map(n),
+    };
+  }
+  if (item.kind === 'arrow') {
+    return {
+      kind: 'arrow',
+      color: item.color,
+      width: item.width / w,
+      atMs,
+      a: n(item.a),
+      b: n(item.b),
+    };
+  }
+  if (item.kind === 'rect' || item.kind === 'ellipse') {
+    return {
+      kind: item.kind,
+      color: item.color,
+      width: item.width / w,
+      atMs,
+      a: n(item.a),
+      b: n(item.b),
+    };
+  }
+  if ('pos' in item) {
+    return {
+      kind: 'text',
+      color: item.color,
+      size: item.size / w,
+      atMs,
+      pos: n(item.pos),
+      text: item.text,
+    };
+  }
+  return {
+    kind: item.kind,
+    color: item.color,
+    width: item.width / w,
+    atMs,
+    a: n(item.a),
+    b: n(item.b),
+  };
+}
+
 export function rectFromPoints(a: { x: number; y: number }, b: { x: number; y: number }): Rect {
   return {
     x: Math.min(a.x, b.x),

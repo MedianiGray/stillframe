@@ -61,12 +61,15 @@ systemAudio / mic ──► AudioContext 混音 ──► audio track
 
 停止后返回 Blob，与截图走同一套保存/图库链路。
 
-桌面壳不走上面这条，改成原生管线（`desktop/src/lib.rs` + `recorder.rs` + `win_capture.rs` + `win_audio.rs`）：
+桌面壳不走上面这条，改成原生管线（`desktop/src/lib.rs` + `recorder.rs` + `win_capture.rs` + `win_audio.rs` + `win_annot.rs`）：
 
 ```
-FrameGrabber::grab() ──► Encoder::push_frame() ──► ffmpeg stdin (rawvideo)
-      │                        │                        │
- DXGI Dup.  ─失败回退→ BitBlt    h264_qsv ─不可用→ libx264   └─► MP4 (+faststart)
+FrameGrabber::grab() ──► [win_annot::Layer 合成] ──► Encoder::push_frame() ──► ffmpeg stdin (rawvideo)
+      │                        │                          │                        │
+ DXGI Dup.  ─失败回退→ BitBlt   有活动标注才 memcpy 进 DIB    h264_qsv ─不可用→ libx264   └─► MP4 (+faststart)
+                          然后用 GDI 画线/箭头/文字/激光
+                                    ▲
+   前端 push_record_annotation / push_record_laser ──┘（归一化坐标 + atMs）
 
 ffmpeg -f dshow (麦克风) ──► WAV(48k/mono) ─┐
 win_audio WASAPI 环回(系统声) ──► WAV(混音格式) ┘   0/1/2 轨
@@ -79,6 +82,7 @@ win_audio WASAPI 环回(系统声) ──► WAV(混音格式) ┘   0/1/2 轨
 - 节奏由 `pace_frame` 保证：目标帧数只由「已跑秒数 × 帧率」决定，落后就重复当前帧补齐，剩 2ms 以内忙等到点；收尾 `pad_to` 按真实秒数补足，成片时长因此与录制时长一致；录制期 `timeBeginPeriod(1)` 提高 sleep 精度。
 - 麦克风是**独立进程**（`Encoder::start` 另起 ffmpeg 录 `dshow` 到 WAV，先等文件落盘再开始抓帧），`mark_end` 发 `q` 让它收尾。分离是必须的：同一进程里 dshow 是无限流，视频 stdin EOF 后 FFmpeg 不退出。
 - 系统声是**自写 WASAPI 环回**（`win_audio.rs`）：默认渲染端点 → `Initialize(LOOPBACK)` → `IAudioCaptureClient` 逐包读，按 `GetMixFormat()` 的真实格式混成单声道 i16 WAV，停止时回填 RIFF 头；`start()` 用 mpsc 等初始化（8 秒超时），失败返回错误由录制静默退回纯画面。
+- 录屏标注是**前端推、后端烧**（`win_annot.rs`）：画布坐标 / 线宽 / 字号都由前端归一化到 `0..1`，附 `atMs`（相对开始录制）；`record_loop` 每帧取一次快照，`Layer::has_activity` 说有内容才把 BGRA `memcpy` 进 32 位 top-down DIB，再用 GDI 画（矩形/椭圆折线、箭头三角、`TextOutW` 文字、收缩红点激光）；没有活动标注时完全不碰 DIB。撤销 / 清除有独立命令，只影响后续帧。GDI 无抗锯齿，这是当前已知差距。
 - `Encoder::finish` 收齐 0/1/2 条音轨：每条按自己的 WAV 头算时长、裁掉比画面多录的头部，1 条直接 `-map`，2 条 `amix=inputs=2:duration=longest` 合一条 AAC，尾部 `-shortest` 追齐；不足 2KB 的 WAV 视为没采到，删掉不留空音轨；封装失败只写日志，画面 MP4 保留。
 - 统计口径：`fps` 是内容更新率（重复帧不计），`frames` 是成片总帧数，`backend` 记实际路径（如 `dxgi+h264_qsv+mic+sys`）。
 
@@ -104,6 +108,10 @@ win_audio WASAPI 环回(系统声) ──► WAV(混音格式) ┘   0/1/2 轨
 | `scroll_at` | `x`, `y`, `notches` | — | 向目标窗口注入竖向滚轮，光标用完即复位（自动滚动长截图用） |
 | `start_recording` | `rect?`, `fps?`, `ffmpeg?`, `mic?`, `system?` | 即将写入的 MP4 路径 | 起抓帧线程 + FFmpeg；`rect` 为全屏冻结图坐标，缺省录整屏；`mic` / `system` 默认 `false`，为 `true` 时分别另起 FFmpeg 录麦克风 WAV、WASAPI 环回录系统声 WAV（设备打不开则静默退回，两路可同时） |
 | `stop_recording` | — | `{path,frames,seconds,fps,dropped,writeAvgMs,grabAvgMs,repeats,backend}` | 停录、停环回与麦克风、等 FFmpeg 收尾（有音轨则再封装一次），回传实绩（`fps` 为内容更新率，重复帧不计；`backend` 带 `+mic` / `+sys` 表示采到了哪几路） |
+| `push_record_annotation` | `annotation`（`{kind,color,width?,atMs,points?/a?/b?/pos?/text?/size?}`，坐标与尺寸已归一化） | — | 录屏标注落定即推；桌面壳按 `atMs` 决定从第几帧开始画 |
+| `push_record_laser` | `x`, `y`, `atMs` | — | 激光轨迹点（前端 40ms 节流），只留最近 1.6 秒 |
+| `undo_record_annotation` | — | — | 撤掉最后一条标注，后续帧不再画它（已录出的帧不变） |
+| `clear_record_annotation` | — | — | 清空标注与激光残影 |
 | `list_windows` | — | `[{title, id}]` | 窗口列表（选区吸附/指定窗口截图） |
 
 保存策略（`src/lib/save.ts`）：桌面端手动保存走 `save_png`、自动保存走 `write_shot`；Android 两端都走 `Bridge.savePng`（相册，无弹窗）；网页端优先写已授权目录，未授权时手动保存退回下载、自动保存直接放弃。

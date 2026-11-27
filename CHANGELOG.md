@@ -109,6 +109,23 @@
 - **清理过期说明**：README 原先写着「选框的 Alt 直线吸附未做」，实际 `SelectionOverlay` 早已接了修饰键；改为如实说明「修饰键只在按住时生效，不做粘滞」和「标注还不能拖拽微调」这两条真实边界。
 - 单测：`tests/annotate.test.ts` 6 条（正向/反向等比、水平/垂直/45° 吸附、几乎没动不闪），全套 43 条通过；`npx tsc --noEmit` 零错误。
 
+## v0.3 第六批：录屏标注进成片（2026-11-27）
+
+录屏条上画的箭头、方框、文字在 QQ 里是会跟着录像进成片的；此前桌面壳只有画面，标注只在网页端（画在 canvas 流里）成立。这一批把桌面这条链闭合。
+
+- **新增 `desktop/src/win_annot.rs`（约 350 行）**：离屏画布 = 一块 32 位 top-down `CreateDIBSection` + 一个 `CreateCompatibleDC`。抓帧器交出来的本来就是 BGRA，直接 `memcpy` 进去就能画、能交给编码器，不需要再做一次格式转换。
+- **GDI 绘制取舍**：矩形 / 椭圆用 `Polyline` 手写多段折线（矩形 5 点闭合、椭圆 48 边形），避开 `HOLLOW_BRUSH` 那套状态；箭头 = 线 + `CreateSolidBrush` 填充三角；文字用 `CreateFontW("Microsoft YaHei UI")` + `SetBkMode(TRANSPARENT)` + `TextOutW`，行距 1.28；激光是随时间收缩的红点（1.2 秒残影，1.5 秒后清点）。字体句柄按字号缓存，只在字号变化时重建。
+- **零成本跳过**：`Layer::has_activity` 先看有没有已出现且未撤销的标注、有没有 1.2 秒内的激光点；一条都没有就完全不碰 DIB，直接用抓帧原始缓冲喂编码器。
+- **坐标与时间统一归一化**：前端把画布坐标、线宽、字号全部按选区宽高归一（`0..1`），桌面壳按帧尺寸乘回来——DPI 缩放、非整数缩放都不用在两个模块之间来回约定；`atMs` 以开始录制那一刻为原点，标注落定即推、边录边推，不用等录完再合成。
+- **撤销 / 清除同步**：新增命令 `undo_record_annotation` / `clear_record_annotation`。画布上撤一条，成片后面的帧就不再画它（已录进去的帧保持原样，录像不能倒着改）。
+- **新命令**：`push_record_annotation(annotation)`、`push_record_laser(x, y, atMs)`；`start_recording` 前清空上一段的标注，避免笔迹串段；标注上限 256 条，超了丢最老的，长时间录制不会无限吃内存。
+- **前端**：`toNativeAnnotation()` 抽到 `src/lib/annotate.ts`（纯函数，可测）；`RecordPanel` 在标注落定、文字回车时推一条，激光按下 / 拖动按 40ms 节流推送，`nativeClockRef` 记开始录制的时刻；撤销 / 清除按钮同时通知桌面壳。
+- **新标定入口**：`--probe-annot=<json>`，可预置一组归一化标注数组，和 `--probe-audio` / `--probe-system` 叠加。
+- **真机验收**：1280×720 × 12 秒（`ffplay` 全屏黑底，保证 DXGI 有帧）预置 5 条标注（1s 方框 / 2s 椭圆 / 3s 箭头 / 4s 画笔 / 5s 中文文字）→ `frames=360 seconds=12 dropped=0 fps=25.1 write_avg_ms=3.8`；抽 2s / 4s / 6s 三帧核对：2s 只有方框+椭圆、4s 已有四条、6s 五条齐全，中文「标注进成片」逐字正确。
+- **开销对照**：同条件无标注 `write_avg_ms=2.3`，带标注 `3.8`——每帧约多 1.5ms（含 3.6MB memcpy 与 5 条 GDI 绘制），离 33ms 预算仍很远。
+- **已知边界**：GDI 无抗锯齿，斜线 / 椭圆比 QQ 的 Direct2D 略硬；标注不能在画布上再选中拖拽微调。两条都写进 README「已知限制」。
+- 单测：`tests/annotate.test.ts` 加 3 条（矩形归一化、画笔逐点 + 字号归一化、选区为 0 不产生 Inf/NaN），全套 46 条通过；`tsc --noEmit` 零错误；`tools/recorder-check` 回归 `CHECK_EXIT=0`。
+
 ## v0.3 第二批：桌面录制改走原生 30 帧管线（2026-11-27）
 
 - **换掉那条跑不动的路**：桌面壳里录屏原本是「`capture_screen` 每 320ms 轮询一次 → 画进 canvas → `canvas.captureStream` → MediaRecorder」，实测个位数帧率、只能出 WebM，撑不起「可交付录像」（蓝图 G2 / 5.2）。现在桌面壳点开始录制，直接交给 Rust：抓帧线程按目标间隔抓选区，RGBA 原始帧写进 FFmpeg 的 stdin，libx264 `veryfast` / CRF 20 编码成 MP4（`+faststart`），落在 `图片/Stillframe/录屏-<时间戳>.mp4`。
