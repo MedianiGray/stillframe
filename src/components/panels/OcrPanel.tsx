@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Copy, Languages, ScanText, Save, X } from 'lucide-react';
+import { Copy, FileDown, Languages, ScanText, Save, X } from 'lucide-react';
 import type { Settings } from '../../lib/settings';
 import { recognize, toOcrBlob } from '../../lib/ocr';
 import { detectContent } from '../../lib/intent';
 import { hostKind, nativeTessdata } from '../../lib/desktop';
-import { makeThumbnail } from '../../lib/image';
+import { makeThumbnail, downloadBlob, timestampName } from '../../lib/image';
+import { paragraphsToMarkdown } from '../../lib/markdown';
 import { putShot } from '../../lib/storage';
 import { useToast } from '../Toasts';
 
@@ -96,6 +97,24 @@ export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: Ocr
     } catch {
       toast('复制失败，请手动选中', 'warn');
     }
+  };
+
+  const exportDocs = () => {
+    // 以当前可编辑的内容为准：段落视图用聚好的段落，行视图保持逐行结构
+    const source =
+      viewMode === 'para' && paragraphs.length
+        ? paragraphs
+        : text
+            .split('\n')
+            .map((line) => line.trimEnd())
+            .filter((line) => line.trim().length > 0);
+    if (!source.length) return;
+    const doc = paragraphsToMarkdown(source, {
+      kind: read?.kind,
+      footer: '本地识别 · stillframe',
+    });
+    downloadBlob(new Blob([doc], { type: 'text/markdown;charset=utf-8' }), timestampName('取字', 'md'));
+    toast(`已导出 Markdown · ${source.length} 段`, 'ok');
   };
 
   const save = async () => {
@@ -278,6 +297,15 @@ export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: Ocr
               <Save size={14} /> 存图库
             </button>
           </div>
+          <button
+            type="button"
+            className="btn mt-1.5 w-full"
+            disabled={!text}
+            onClick={exportDocs}
+            title="按当前视图导出 Markdown：清单补「-」，代码包代码块"
+          >
+            <FileDown size={14} /> 导出 Markdown
+          </button>
           <button
             type="button"
             className="btn btn-accent mt-2 w-full"
