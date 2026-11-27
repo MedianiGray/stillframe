@@ -16,7 +16,8 @@ export interface Settings {
 
 export const DEFAULT_SETTINGS: Settings = {
   ocrLang: 'chi_sim+eng',
-  tessdataPath: 'https://tessdata.projectnaptha.com/4.0.0_fast',
+  // 留空 = 用随站点分发的 ./tessdata：同源、最快，内网和离线部署都能直接用
+  tessdataPath: '',
   translateProvider: 'none',
   translateEndpoint: '',
   translateKey: '',

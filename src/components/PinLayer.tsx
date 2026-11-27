@@ -85,6 +85,7 @@ function PinCard({
     <div
       className="pointer-events-auto absolute border border-amber/40 bg-ink-900 shadow-pop"
       style={{ left: pos.x, top: pos.y, width }}
+      data-testid="pin-card"
     >
       <div
         className="flex cursor-move items-center justify-between border-b border-ink-600 bg-ink-850 px-2 py-1"

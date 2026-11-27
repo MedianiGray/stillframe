@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowRight, Crop, Languages, ScanText, ScrollText, ShieldAlert, Timer, Video } from 'lucide-react';
+import { ArrowRight, Crop, ImagePlus, Languages, ScanText, ScrollText, ShieldAlert, Timer, Video } from 'lucide-react';
 import type { Rect, ToolMode } from '../lib/types';
 import type { Settings } from '../lib/settings';
-import { cropCanvas } from '../lib/image';
+import { canvasFromFile, cropCanvas } from '../lib/image';
 import { grabFrame, openNativeSession, openScreenSession, type ScreenSession } from '../lib/capture';
 import { hostKind, isDesktop, nativeCaptureScreen, nativeCaptureWindow, nativeHideSelf, nativeListWindows, nativeShowSelf, type NativeWindow } from '../lib/desktop';
 import { useToast } from './Toasts';
@@ -100,6 +100,8 @@ export function CaptureWorkspace({
   const sessionRef = useRef<ScreenSession | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [dragOver, setDragOver] = useState(false);
 
   const stopSession = useCallback(() => {
     sessionRef.current?.stop();
@@ -156,6 +158,26 @@ export function CaptureWorkspace({
       toast(error instanceof Error ? error.message : '窗口截图失败', 'warn');
     } finally {
       setLoading(false);
+    }
+  };
+
+  /**
+   * 打开本地图片：手里已有的截图直接进对应面板，不必再截一遍屏。
+   * 三个单帧模式各去各的面板；长图 / 录屏没有「一张图」的语义，统一落到标注台。
+   */
+  const openLocalImage = async (file: File) => {
+    setLoading(true);
+    try {
+      const image = await canvasFromFile(file);
+      const rect: Rect = { x: 0, y: 0, w: image.width, h: image.height };
+      if (mode === 'ocr') setState({ kind: 'ocr', image });
+      else if (mode === 'translate') setState({ kind: 'translate', image });
+      else setState({ kind: 'edit', image, rect });
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '这张图读不出来', 'warn');
+    } finally {
+      setLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -388,9 +410,42 @@ export function CaptureWorkspace({
   const host = hostKind();
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div
+      className="flex min-h-0 flex-1 flex-col"
+      onDragOver={(event) => {
+        if (!event.dataTransfer?.types.includes('Files')) return;
+        event.preventDefault();
+        setDragOver(true);
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(event) => {
+        const file = event.dataTransfer?.files?.[0];
+        setDragOver(false);
+        if (!file) return;
+        event.preventDefault();
+        void openLocalImage(file);
+      }}
+    >
+      {dragOver ? (
+        <div className="pointer-events-none fixed inset-0 z-50 flex items-center justify-center bg-ink-900/70">
+          <div className="border border-dashed border-amber/60 bg-ink-850 px-6 py-4 text-[13px] text-paper/85">
+            松手就把这张图送进{mode === 'ocr' ? '取字' : mode === 'translate' ? '译屏' : '标注台'}
+          </div>
+        </div>
+      ) : null}
       <div className="stage-grid flex min-h-0 flex-1 items-center justify-center px-6 py-8">
         <div className="w-full max-w-[840px]">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            data-testid="open-image-input"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void openLocalImage(file);
+            }}
+          />
           <div className="flex items-start gap-4">
             <div className="relative flex h-14 w-14 shrink-0 items-center justify-center border border-amber/40 bg-amber/10">
               <span className="frame-corner -left-px -top-px border-l-2 border-t-2" />
@@ -421,6 +476,16 @@ export function CaptureWorkspace({
             <button type="button" className="btn btn-accent !px-4 !py-2.5 text-[13px]" disabled={loading} onClick={() => start(mode)}>
               {loading ? '正在请求屏幕授权' : '开始捕捉'}
               <ArrowRight size={15} />
+            </button>
+            <button
+              type="button"
+              className="btn !px-3 !py-2.5 text-[13px]"
+              disabled={loading}
+              onClick={() => fileInputRef.current?.click()}
+              title="打开本地图片，直接进标注台 / 取字 / 译屏（也可以把图片拖进窗口）"
+            >
+              <ImagePlus size={15} />
+              打开图片
             </button>
             {mode === 'snap' || mode === 'ocr' || mode === 'translate' ? (
               <div className="flex items-center gap-1.5">

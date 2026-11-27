@@ -73,6 +73,8 @@ export function OcrPanel({ image, settings, onClose, onSaved, onTranslate }: Ocr
       toast(result.text ? `识别完成 · ${result.paragraphs.length} 段` : '没有识别到文字', result.text ? 'ok' : 'warn');
     } catch (error) {
       const message = error instanceof Error ? error.message : '识别失败，可能是语言包下载失败';
+      // 页面上只留一句话，原始错误打进控制台，排查时不用猜
+      console.debug('[ocr] 识别失败', error);
       setError(message);
       toast(message, 'warn');
     } finally {

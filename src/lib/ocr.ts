@@ -70,26 +70,36 @@ function localEngine(): { workerPath: string; corePath: string } {
   return { workerPath: `${dir}/worker.min.js`, corePath: dir };
 }
 
+/** 探测语言包目录的超时：弱网下不该为一个 HEAD 白等半分钟。 */
+const PROBE_TIMEOUT_MS = 3000;
+
+async function probe(base: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${base}/eng.traineddata.gz`, { method: 'HEAD', signal: controller.signal });
+    return response.ok;
+  } catch {
+    // 跨域/离线/超时都按不可用处理，继续试下一个。
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
- * 语言包目录解析：优先用户配置，其次随站点分发的 ./tessdata（内网/离线部署用），
- * 再走 fast CDN（体积小、加载快），最后回落到 best CDN 兜底。只发 HEAD，不额外下载。
+ * 语言包目录解析：随站点分发的 ./tessdata 排第一（同源、一定最快），
+ * 其次用户配置，再走 fast CDN（体积小、加载快），最后回落到 best CDN 兜底。
+ * 只发 HEAD，且每个探测都有超时，离线时不会把首帧拖成半分钟。
  */
 async function resolveLangPath(preferred: string): Promise<string> {
-  const candidates = [
-    preferred,
-    bundledTessdata(),
-    FAST_CDN,
-    BEST_CDN,
-  ];
+  const candidates = [bundledTessdata(), preferred, FAST_CDN, BEST_CDN];
+  const seen = new Set<string>();
   for (const base of candidates) {
     const trimmed = toAbsolute(base);
-    if (!trimmed) continue;
-    try {
-      const response = await fetch(`${trimmed}/eng.traineddata.gz`, { method: 'HEAD' });
-      if (response.ok) return trimmed;
-    } catch {
-      // 跨域/离线都按不可用处理，继续试下一个。
-    }
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    if (await probe(trimmed)) return trimmed;
   }
   return toAbsolute(preferred);
 }
@@ -101,6 +111,11 @@ function base64ToBytes(base64: string): Uint8Array {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+/** gzip 头两个字节是 1F 8B；服务器自动解压过就不再走 DecompressionStream。 */
+function isGzip(bytes: Uint8Array): boolean {
+  return bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
 }
 
 /** 流式 gunzip：主线程解压，避免把大 gz 丢进 Worker 再卡一道结构化克隆。 */
@@ -150,7 +165,9 @@ export async function preloadLanguages(langCodes: string[], options: PreloadOpti
     }
 
     options.onProgress?.(index / total, `解压语言包 ${code}`);
-    const bytes = await gunzip(gz);
+    // 有些静态服务器（含 vite dev/preview）会对 .gz 直接发 Content-Encoding: gzip，
+    // 浏览器已替我们解压过一层，再解一次就会失败。按 gzip magic 判断要不要解。
+    const bytes = isGzip(gz) ? await gunzip(gz) : gz;
     await idbSet(cacheKey, bytes);
     options.onProgress?.((index + 1) / total, `语言包就绪 ${code}`);
   }
@@ -179,9 +196,16 @@ async function getWorker(options: OcrOptions): Promise<OcrWorker> {
     corePath: engine.corePath,
     langPath,
     gzip: true,
+    // 默认会用 blob 包一层再 importScripts：blob worker 的来源不是本页面 origin，
+    // 内网/离线部署时这一步直接被判跨域，报 "Failed to fetch"。这里直连同源脚本。
+    workerBlobURL: false,
     logger: (message: { status: string; progress: number }) => {
       progressHandler?.(message.progress ?? 0, message.status ?? '');
     },
+  }).catch((cause: unknown) => {
+    // 引擎启动失败时把底层原因留在控制台：worker 里的报错到了主线程只剩一句话
+    console.debug('[ocr] createWorker 失败', { langPath, workerPath: engine.workerPath, corePath: engine.corePath, cause });
+    throw cause;
   });
 
   cache = { lang: options.lang, worker };

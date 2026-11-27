@@ -14,9 +14,26 @@ export function canvasFromSource(
   return canvas;
 }
 
+/**
+ * 本地图片文件 → 画布。
+ *
+ * 为什么要这个入口：此前只能从屏幕抓帧进编辑台，手里已有的 PNG/JPEG 要么先打开
+ * 再截一遍，要么去外面的工具改。QQ 截图支持直接把图片拖进来，这里补齐。
+ * 用 `createImageBitmap` 而不是 `new Image()`：前者不依赖 DOM 挂载、也在 WebView2 里有，
+ * 而且顺手把 EXIF 方向处理掉了。
+ */
+export async function canvasFromFile(file: File): Promise<HTMLCanvasElement> {
+  if (!file.type.startsWith('image/')) throw new Error('这不是图片文件');
+  const bitmap = await createImageBitmap(file);
+  try {
+    return canvasFromSource(bitmap, bitmap.width, bitmap.height);
+  } finally {
+    bitmap.close?.();
+  }
+}
+
 export function cropCanvas(source: HTMLCanvasElement, rect: Rect): HTMLCanvasElement {
-  const x = Math.max(0, Math.round(rect.x));
-  const y = Math.max(0, Math.round(rect.y));
+  const x = Math.max(0, Math.round(rect.x));  const y = Math.max(0, Math.round(rect.y));
   const w = Math.max(1, Math.round(Math.min(rect.w, source.width - x)));
   const h = Math.max(1, Math.round(Math.min(rect.h, source.height - y)));
   const canvas = document.createElement('canvas');

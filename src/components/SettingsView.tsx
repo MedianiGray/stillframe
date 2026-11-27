@@ -75,12 +75,12 @@ export function SettingsView({ settings, onSave }: SettingsViewProps) {
                 className="field mt-1"
                 value={draft.tessdataPath}
                 onChange={(event) => patch('tessdataPath', event.target.value)}
-                placeholder="https://tessdata.projectnaptha.com/4.0.0"
+                placeholder="留空则用站点自带的 ./tessdata"
               />
             </label>
           </div>
           <p className="mt-2 text-[11px] leading-5 text-muted">
-            首次识别会按这个地址下载语言包并缓存在本地。校园网下载慢时，可换成本地 mirror 或自建路径。
+            留空时用随站点分发的语言包，离线与内网都可用；填地址则优先用该 mirror（探测不通会自动退回内置包）。首次识别会把语言包缓存在本地，之后不再下载。
           </p>
         </section>
 
