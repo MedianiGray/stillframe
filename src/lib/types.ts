@@ -21,7 +21,7 @@ export type Annotation =
   | { id: string; kind: 'pen'; color: string; weight: number; points: Point[] }
   | { id: string; kind: 'highlight'; color: string; rect: Rect }
   | { id: string; kind: 'mosaic'; rect: Rect; block: number }
-  | { id: string; kind: 'text'; color: string; size: number; pos: Point; text: string }
+  | { id: string; kind: 'text'; color: string; size: number; pos: Point; text: string; lineHeight?: number }
   | { id: string; kind: 'step'; color: string; pos: Point; index: number };
 
 export type AnnotationKind = Annotation['kind'];

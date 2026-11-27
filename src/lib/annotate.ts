@@ -1,4 +1,5 @@
-import type { Annotation, Rect } from './types';
+import { resolveSelection } from './selection';
+import type { Annotation, Point, Rect } from './types';
 
 export function rectFromPoints(a: { x: number; y: number }, b: { x: number; y: number }): Rect {
   return {
@@ -15,6 +16,31 @@ export function normalizeRect(rect: Rect): Rect {
     y: Math.min(rect.y, rect.y + rect.h),
     w: Math.abs(rect.w),
     h: Math.abs(rect.h),
+  };
+}
+
+/**
+ * Shift 等比：把拖出来的矩形约束成正方形，方向跟着指针走。
+ * 直接复用选区那套 `resolveSelection`，拖动选区和画标注才是同一种手感。
+ */
+export function squareRect(start: { x: number; y: number }, point: { x: number; y: number }): Rect {
+  return resolveSelection(start.x, start.y, point.x, point.y, { alt: false, shift: true });
+}
+
+/**
+ * Alt 吸附：把箭头线段吸到最近的 0° / 45° / 90° 方向，长度保持不变。
+ * QQ 里按住修饰键画直线就是这个手感，画流程指向、坐标轴都靠它。
+ */
+export function snapAngle(from: { x: number; y: number }, to: { x: number; y: number }): Point {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy);
+  if (length < 1) return { x: from.x, y: from.y };
+  const step = Math.PI / 4;
+  const angle = Math.round(Math.atan2(dy, dx) / step) * step;
+  return {
+    x: from.x + Math.cos(angle) * length,
+    y: from.y + Math.sin(angle) * length,
   };
 }
 
@@ -84,8 +110,10 @@ export function drawAnnotations(
         ctx.font = `600 ${item.size * scale}px "Segoe UI", "Microsoft YaHei UI", sans-serif`;
         ctx.textBaseline = 'top';
         const lines = item.text.split('\n');
+        // 行距按字号倍数算：1.28 是默认行高，调紧到 1.0 也不叠字。
+        const step = item.size * (item.lineHeight ?? 1.28) * scale;
         lines.forEach((line, index) => {
-          ctx.fillText(line, item.pos.x, item.pos.y + index * item.size * 1.28 * scale);
+          ctx.fillText(line, item.pos.x, item.pos.y + index * step);
         });
         break;
       }

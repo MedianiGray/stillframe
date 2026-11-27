@@ -97,6 +97,18 @@
 - **接线**：`start_recording(rect, fps, ffmpeg, mic, system)`；前端 `nativeStartRecording(rect, fps, mic, system)` 透传 `soundOn`；桌面壳里系统声按钮直接 toggle（不再提示「等下一批」），开始录制时 toast 点名采了哪几路（「采麦克风 + 系统声」）；`--probe-system` 是新的标定开关，可与 `--probe-audio` 叠加。
 - **顺手把日志收口**：`log_line` 从 `lib.rs` 挪进 `recorder.rs` 并改为读 `LOCALAPPDATA`，这样 `tools/recorder-check` 单独编译这份代码时不再因找不到 crate 根函数失败（原先是 `crate::log_line`）。
 
+## v0.4 第六批：标注手感对齐 QQ（2026-11-27）
+
+对照 QQ 截图/录屏的标注面板（蓝图 G5「Alt 吸附直线、Shift 等比、文字样式、重做栈」），把缺的补上：
+
+- **`Shift` 等比**：拖动矩形 / 椭圆 / 荧光 / 马赛克时按住 `Shift` 一律约束成正方形（分别得到方块、正圆、方形荧光、方形马赛克）。实现直接复用选框那套 `resolveSelection(..., { shift: true })`，选区和画标注是同一种手感，不再写第二份逻辑。
+- **`Alt` 吸附直线**：画箭头时按住 `Alt` 把线段吸到最近的 0° / 45° / 90° 方向，长度保持不变——画垂直指向线不用再靠手稳。
+- **录屏条同步**：`RecordPanel` 的矩形 / 椭圆 / 箭头也接上同样两个修饰键，录着的时候随手画方块和直箭头一致。
+- **文字行距可调**：`Annotation` 的 text 分支加了可选 `lineHeight`（按字号倍数，默认 1.28），多行文字不再只能吃固定行高；调紧到 1.0 也不叠字。
+- **重做栈本来就是齐的**：`Editor` 的 `canRedo / onRedo` 已有按钮与 `Ctrl+Shift+Z` / `Ctrl+Y` 两条快捷键，这一条核对后确认无需改。
+- **清理过期说明**：README 原先写着「选框的 Alt 直线吸附未做」，实际 `SelectionOverlay` 早已接了修饰键；改为如实说明「修饰键只在按住时生效，不做粘滞」和「标注还不能拖拽微调」这两条真实边界。
+- 单测：`tests/annotate.test.ts` 6 条（正向/反向等比、水平/垂直/45° 吸附、几乎没动不闪），全套 43 条通过；`npx tsc --noEmit` 零错误。
+
 ## v0.3 第二批：桌面录制改走原生 30 帧管线（2026-11-27）
 
 - **换掉那条跑不动的路**：桌面壳里录屏原本是「`capture_screen` 每 320ms 轮询一次 → 画进 canvas → `canvas.captureStream` → MediaRecorder」，实测个位数帧率、只能出 WebM，撑不起「可交付录像」（蓝图 G2 / 5.2）。现在桌面壳点开始录制，直接交给 Rust：抓帧线程按目标间隔抓选区，RGBA 原始帧写进 FFmpeg 的 stdin，libx264 `veryfast` / CRF 20 编码成 MP4（`+faststart`），落在 `图片/Stillframe/录屏-<时间戳>.mp4`。

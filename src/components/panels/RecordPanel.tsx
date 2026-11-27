@@ -18,6 +18,7 @@ import {
   Zap,
 } from 'lucide-react';
 import type { Rect } from '../../lib/types';
+import { snapAngle, squareRect } from '../../lib/annotate';
 import type { ScreenSession } from '../../lib/capture';
 import { RegionRecorder } from '../../lib/recorder';
 import { downloadBlob, timestampName } from '../../lib/image';
@@ -396,9 +397,24 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
           : { id: 'd', kind: 'pen', color, width: 3, points: [drag.a, p] },
       );
     } else if (drag.kind === 'rect' || drag.kind === 'ellipse') {
+      // Shift 等比：录屏标注也跟截图编辑器同一套手感（方块 / 正圆）
+      if (event.shiftKey) {
+        const box = squareRect(drag.a, p);
+        setDraft({
+          id: 'd',
+          kind: drag.kind,
+          color,
+          width: 3,
+          a: { x: box.x, y: box.y },
+          b: { x: box.x + box.w, y: box.y + box.h },
+        });
+        return;
+      }
       setDraft({ id: 'd', kind: drag.kind, color, width: 3, a: drag.a, b: p });
     } else if (drag.kind === 'arrow') {
-      setDraft({ id: 'd', kind: 'arrow', color, width: 3, a: drag.a, b: p });
+      // Alt 吸附：箭头吸到 0/45/90°，画垂直指向不会歪
+      const to = event.altKey ? snapAngle(drag.a, p) : p;
+      setDraft({ id: 'd', kind: 'arrow', color, width: 3, a: drag.a, b: to });
     }
   };
 

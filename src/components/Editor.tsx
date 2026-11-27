@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { Annotation, AnnotationKind, Point, Rect } from '../lib/types';
-import { drawAnnotations, rectFromPoints } from '../lib/annotate';
+import { drawAnnotations, rectFromPoints, snapAngle, squareRect } from '../lib/annotate';
 import { canvasToBlob, copyBlobToClipboard, makeThumbnail, timestampName } from '../lib/image';
 import { putShot } from '../lib/storage';
 import { describeSave, saveBlob } from '../lib/save';
@@ -134,7 +134,10 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
     const drag = dragRef.current;
     if (!drag) return;
     const point = toImagePoint(event);
-    const rect: Rect = rectFromPoints(drag.start, point);
+    // Shift 等比：矩形 / 椭圆 / 荧光 / 马赛克都变正方形（分别得到正方形、正圆、方块）
+    const rect: Rect = event.shiftKey ? squareRect(drag.start, point) : rectFromPoints(drag.start, point);
+    // Alt 吸附：箭头吸到 0/45/90°，要画垂直指示线时不用手抖
+    const arrowTo = event.altKey ? snapAngle(drag.start, point) : point;
 
     switch (drag.kind) {
       case 'pen':
@@ -151,7 +154,7 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
         setDraft({ id: 'draft', kind: 'ellipse', color, weight, rect });
         break;
       case 'arrow':
-        setDraft({ id: 'draft', kind: 'arrow', color, weight, from: drag.start, to: point });
+        setDraft({ id: 'draft', kind: 'arrow', color, weight, from: drag.start, to: arrowTo });
         break;
       case 'highlight':
         setDraft({ id: 'draft', kind: 'highlight', color, rect });
