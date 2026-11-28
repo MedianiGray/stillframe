@@ -170,9 +170,30 @@ if (flow === 'snap' || flow === 'full' || flow === 'ocr' || flow === 'record' ||
   } else if (flow === 'scroll') {
     await dragBox(0.2, 0.2, 0.7, 0.7);
     await snap('SCROLL_SELECTED');
-    await page.getByRole('button', { name: /开始拼接|开始滚动/ }).first().click().catch(() => undefined);
-    await page.waitForTimeout(2500);
+    // 和截图/录屏一样，先在选区层双击收口，之后才会出长图工具条（自动滚动在工具条上）。
+    await page.mouse.dblclick(
+      (await page.evaluate(() => window.innerWidth)) * 0.45,
+      (await page.evaluate(() => window.innerHeight)) * 0.45,
+    );
+    await page.waitForTimeout(1500);
+    await snap('SCROLL_PANEL', page, 220);
+    // 长图条上的按钮只有 title，没有文字：按 title 找「自动滚动」。
+    const auto = page.locator('button[title*="自动滚动"]').first();
+    if (await auto.count()) {
+      await auto.click();
+      console.log('SCROLL_AUTO_CLICKED');
+    } else {
+      console.log('SCROLL_NO_AUTO_BUTTON');
+    }
+    await page.waitForTimeout(3000);
     await snap('SCROLLING', page, 220);
+    // 自动滚动每屏 620ms、最多 30 屏；它中途会把自身窗口藏起来，给足时间再取结果。
+    await page.waitForTimeout(22000);
+    await snap('SCROLL_DONE', page, 220).catch((e) => console.log('SCROLL_SNAP_FAILED', String(e).slice(0, 120)));
+    const state = await page
+      .evaluate(() => ({ body: document.body.innerText.slice(0, 700) }))
+      .catch(() => ({ body: '<page suspended>' }));
+    console.log('SCROLL_STATE', JSON.stringify(state));
   } else {
     await page.getByRole('button', { name: '整屏' }).first().click();
     await page.waitForTimeout(2200);
@@ -224,3 +245,5 @@ if (flow === 'quick') {
 if (errors.length) console.log('ERRORS', JSON.stringify(errors.slice(0, 6)));
 // 不能 close：connectOverCDP 的 close 会把宿主窗口一起关掉，壳就退出了。
 // 直接退出 node 即可，WebView 与调试端口都留着。
+// 不显式 exit 的话 CDP 连接会吊住 event loop，脚本跑完也不返回。
+process.exit(errors.length ? 2 : 0);
