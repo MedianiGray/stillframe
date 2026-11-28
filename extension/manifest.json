@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "定格 Stillframe 浏览器截图",
+  "short_name": "定格截图",
+  "version": "0.1.0",
+  "description": "截当前网页 → 框选 → 复制 / 下载 / 送进定格编辑台继续标注与取字。不联网、不上传图片。",
+  "action": {
+    "default_title": "定格截图",
+    "default_popup": "popup.html"
+  },
+  "permissions": ["activeTab", "storage", "clipboardWrite"]
+}

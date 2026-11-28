@@ -20,6 +20,8 @@ interface WorkspaceProps {
   onOpenSettings: () => void;
   onPin: (dataUrl: string, width: number, height: number) => void;
   onLibraryChanged: () => void;
+  /** 已钉住的贴图张数；到 20 张就把工具栏「钉在桌面上」置灰。 */
+  pinCount?: number;
   /** 桌面壳热键 / 快捷浮窗送来的一次「直接开拍」请求；tick 变化即触发。 */
   autoStart?: { mode: ToolMode; tick: number };
 }
@@ -86,6 +88,7 @@ export function CaptureWorkspace({
   onOpenSettings,
   onPin,
   onLibraryChanged,
+  pinCount = 0,
   autoStart,
 }: WorkspaceProps) {
   const toast = useToast();
@@ -110,15 +113,49 @@ export function CaptureWorkspace({
 
   useEffect(() => stopSession, [stopSession]);
 
-  /** 单帧类捕捉：延时倒计时结束后先收起自身窗口，抓完再亮出来，避免把自己拍进画面。 */
+  /**
+   * 收尾必须把窗口亮回来。桌面壳自己都可能在隐藏/显示之间出错，
+   * 所以这里重试一次；仍失败就明说，别让用户以为程序没了。
+   */
+  const showSelfStrict = useCallback(async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        await nativeShowSelf();
+        return;
+      } catch (error) {
+        if (attempt === 1) {
+          toast(
+            error instanceof Error ? `窗口没能自动亮回来：${error.message}` : '窗口没能自动亮回来，请点任务栏里的 Stillframe',
+            'warn',
+          );
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+    }
+  }, [toast]);
+
+  /**
+   * 单帧类捕捉：延时倒计时结束后先收起自身窗口，抓完再亮出来，避免把自己拍进画面。
+   * hide 失败照抓（画面里可能带着本窗口），但收尾一律走 show——藏起来没亮回来才是真事故。
+   */
   const grabWithoutSelf = async () => {
     if (hostKind() !== 'tauri') return nativeCaptureScreen();
-    await nativeHideSelf();
+    try {
+      await nativeHideSelf();
+    } catch (error) {
+      toast(error instanceof Error ? `隐藏窗口失败：${error.message}` : '隐藏窗口失败，画面里可能带着本窗口', 'warn');
+    }
     await new Promise((resolve) => setTimeout(resolve, 180));
+    // 看门狗：抓屏若卡住（DXGI 无响应），finally 永远不会跑到，窗口就会一直藏着
+    const watchdog = window.setTimeout(() => {
+      void nativeShowSelf().catch(() => undefined);
+    }, 5000);
     try {
       return await nativeCaptureScreen();
     } finally {
-      await nativeShowSelf();
+      window.clearTimeout(watchdog);
+      await showSelfStrict();
     }
   };
 
@@ -165,7 +202,7 @@ export function CaptureWorkspace({
    * 打开本地图片：手里已有的截图直接进对应面板，不必再截一遍屏。
    * 三个单帧模式各去各的面板；长图 / 录屏没有「一张图」的语义，统一落到标注台。
    */
-  const openLocalImage = async (file: File) => {
+  const openLocalImage = useCallback(async (file: File) => {
     setLoading(true);
     try {
       const image = await canvasFromFile(file);
@@ -179,7 +216,25 @@ export function CaptureWorkspace({
       setLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
-  };
+  }, [mode]);
+
+  /**
+   * 接住 Ctrl+V：浏览器插件、系统截图工具、聊天窗口复制出来的图都能直接落进来。
+   * 剪贴板里是文字时不动手，免得抢掉文本框自己的粘贴。
+   */
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      const items = Array.from(event.clipboardData?.items ?? []);
+      const file = items
+        .map((item) => (item.kind === 'file' ? item.getAsFile() : null))
+        .find((entry): entry is File => Boolean(entry && entry.type.startsWith('image/')));
+      if (!file) return;
+      event.preventDefault();
+      void openLocalImage(file);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [openLocalImage]);
 
   const start = async (target: ToolMode) => {    setLoading(true);
     const singleFrame = target === 'snap' || target === 'ocr' || target === 'translate';
@@ -368,6 +423,7 @@ export function CaptureWorkspace({
         onOcr={(canvas) => setState({ kind: 'ocr', image: canvas })}
         onTranslate={(canvas) => setState({ kind: 'translate', image: canvas })}
         onRecord={() => void recordFromEditor(state.rect)}
+        pinFull={pinCount >= 20}
       />
     );
   }

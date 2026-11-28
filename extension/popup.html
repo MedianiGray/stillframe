@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>定格截图</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="bar">
+    <strong>定格截图</strong>
+    <span class="hint" id="hint">点「截当前页」开始</span>
+  </header>
+
+  <main id="stage" class="stage empty">
+    <div class="placeholder" id="placeholder">
+      <p>截当前标签页的可视区</p>
+      <p class="mini">也可以在截下来的图上拖框，只留框里那块。</p>
+    </div>
+    <div class="canvas-wrap" id="canvasWrap" hidden>
+      <canvas id="canvas"></canvas>
+      <div class="sel" id="sel" hidden></div>
+    </div>
+  </main>
+
+  <section class="actions">
+    <button id="capture" class="primary">截当前页</button>
+    <button id="copy" disabled>复制图片</button>
+    <button id="download" disabled>存 PNG</button>
+    <button id="open" disabled>送编辑台</button>
+  </section>
+
+  <section class="foot">
+    <label>
+      编辑台地址
+      <input id="editorUrl" type="url" spellcheck="false">
+    </label>
+    <div class="row">
+      <span class="size" id="size"></span>
+      <button id="reset" class="link" disabled>取消框选</button>
+    </div>
+    <p class="mini" id="tip">送编辑台会先把图放进剪贴板，到页面里按 Ctrl+V 就进来了。</p>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>

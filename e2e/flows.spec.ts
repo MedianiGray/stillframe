@@ -1,4 +1,5 @@
 ﻿import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // 用基准里那张中文版面当输入：和 OCR 基准同一份图，出问题时两边能对上
@@ -20,7 +21,7 @@ test('截图链路：打开图片 → 标注 → 保存 → 图库留档', async
 
   // 标注台的保存按钮，title 与 QQ 一致
   const saveButton = page.locator('button[title="保存 Ctrl+S"]');
-  await expect(saveButton).toBeVisible({ timeout: 20_000 });
+  await expect(saveButton).toBeVisible({ timeout: 40_000 });
 
   // 在图上拖一个矩形，工具栏的计数应当从 0 变成 1 才有东西可存
   const canvas = page.locator('canvas').first();
@@ -51,7 +52,7 @@ test('取字链路：打开图片后本地识别出中文', async ({ page }) => 
 
   // 取字面板进来自动跑一次识别；离线语言包随站点分发，不需要外网
   const output = page.locator('textarea').first();
-  await expect(output).toBeVisible({ timeout: 20_000 });
+  await expect(output).toBeVisible({ timeout: 30_000 });
   await expect(output).toHaveValue(/校园网络维护记录|实训室/, { timeout: 75_000 });
 });
 
@@ -60,12 +61,29 @@ test('贴图链路：标注台把成图钉到桌面上', async ({ page }) => {
   await openSample(page, '截图', '捕捉台 · 截图');
 
   // 先等编辑台真的把图画出来了，否则点钉图时 canvas 还是空的
-  await expect(page.locator('button[title="保存 Ctrl+S"]')).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator('button[title="保存 Ctrl+S"]')).toBeVisible({ timeout: 40_000 });
   await expect(page.locator('canvas').first()).toBeVisible();
 
   await page.locator('button[title="钉在桌面上"]').click();
 
   // 贴图浮层自带缩放百分比，出现即说明成图被钉住了
-  await expect(page.getByTestId('pin-card')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId('pin-card')).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId('pin-card')).toContainText('100%');
+});
+
+test('粘贴链路：Ctrl+V 把剪贴板里的图接进标注台', async ({ page }) => {
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { name: '捕捉台 · 截图' })).toBeVisible();
+
+  // 真实剪贴板在 headless 里没法直接写，构造一个带 image/png 的 paste 事件走同一条通道
+  const dataUrl = `data:image/png;base64,${readFileSync(SAMPLE).toString('base64')}`;
+  await page.evaluate(async (src) => {
+    const blob = await (await fetch(src)).blob();
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([blob], 'paste.png', { type: 'image/png' }));
+    window.dispatchEvent(new ClipboardEvent('paste', { clipboardData: transfer, bubbles: true }));
+  }, dataUrl);
+
+  // 进到标注台才有保存按钮：说明图真的被接住了
+  await expect(page.locator('button[title="保存 Ctrl+S"]')).toBeVisible({ timeout: 30_000 });
 });

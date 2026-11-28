@@ -1,0 +1,94 @@
+:root {
+  color-scheme: light dark;
+  --ink: #1d2129;
+  --mute: #6b7280;
+  --line: #e5e7eb;
+  --bg: #ffffff;
+  --soft: #f5f6f7;
+  --brand: #2563eb;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  width: 420px;
+  font: 13px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+.bar {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.hint { color: var(--mute); font-size: 12px; }
+.stage {
+  margin: 10px 12px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+  overflow: hidden;
+}
+.stage.empty { min-height: 150px; display: flex; }
+.placeholder { margin: auto; text-align: center; color: var(--mute); }
+.placeholder .mini { font-size: 12px; }
+.canvas-wrap { position: relative; line-height: 0; cursor: crosshair; }
+canvas { display: block; width: 100%; height: auto; }
+.sel {
+  position: absolute;
+  border: 1px dashed var(--brand);
+  background: rgba(37, 99, 235, .12);
+  pointer-events: none;
+}
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px 12px 0;
+}
+button {
+  font: inherit;
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: #c7ccd4; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+  font-weight: 600;
+}
+button.link {
+  height: 24px;
+  border: 0;
+  background: none;
+  color: var(--mute);
+  text-decoration: underline;
+  padding: 0;
+  width: auto;
+}
+.foot { padding: 10px 12px 12px; }
+.foot label { display: block; color: var(--mute); font-size: 12px; }
+.foot input {
+  width: 100%;
+  height: 28px;
+  margin-top: 4px;
+  padding: 0 8px;
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.row { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
+.size { color: var(--mute); font-size: 12px; }
+.mini { color: var(--mute); font-size: 12px; margin: 6px 0 0; }
+@media (prefers-color-scheme: dark) {
+  :root { --ink: #e8eaed; --mute: #9aa0a6; --line: #3c4043; --bg: #202124; --soft: #2a2c2f; }
+}

@@ -1,9 +1,12 @@
-import { defineConfig } from '@playwright/test';
+﻿import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
+  // 先开一次浏览器把首页渲染完：这台机器冷启 Chromium 再冷读前端包能把第一条卡满超时
+  globalSetup: './e2e/global-setup.ts',
   timeout: 90_000,
-  expect: { timeout: 15_000 },
+  // 低配机器上解码大图 + 首帧渲染能到十几秒，给足余量，免得偶发红灯
+  expect: { timeout: 25_000 },
   fullyParallel: false,
   reporter: [['list']],
   use: {
