@@ -1105,8 +1105,126 @@ fn stop_recording() -> Result<recorder::RecordingStats, String> {
         .map_err(|_| "录制线程异常退出".to_string())?
 }
 
+/// 托盘是否真的建起来了。建不起来就不拦「关闭窗口」——否则用户关掉窗口后既没有托盘
+/// 入口、也退不出去，程序会变成看不见的幽灵进程。
+static TRAY_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 开机自启：写 HKCU 的 Run 键，登录后拉起快捷浮窗（--quick），不展开主窗。
+const AUTOSTART_KEY: &str = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const AUTOSTART_VALUE: &str = "Stillframe";
+
+#[derive(Serialize)]
+struct AppInfo {
+    version: String,
+    platform: String,
+    exe: String,
+}
+
+#[tauri::command]
+fn app_info() -> AppInfo {
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        platform: std::env::consts::OS.to_string(),
+        exe: std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+#[tauri::command]
+fn autostart_enabled() -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        match std::process::Command::new("reg")
+            .args(["query", AUTOSTART_KEY, "/v", AUTOSTART_VALUE])
+            // CREATE_NO_WINDOW：注册表查询别在用户面前闪一个黑框
+            .creation_flags(0x0800_0000)
+            .output()
+        {
+            Ok(out) => out.status.success(),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[tauri::command]
+fn set_autostart(enabled: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let status = if enabled {
+            let exe = std::env::current_exe().map_err(err)?;
+            let value = format!("\"{}\" --quick", exe.display());
+            std::process::Command::new("reg")
+                .args([
+                    "add",
+                    AUTOSTART_KEY,
+                    "/v",
+                    AUTOSTART_VALUE,
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &value,
+                    "/f",
+                ])
+                .creation_flags(0x0800_0000)
+                .status()
+                .map_err(err)?
+        } else {
+            std::process::Command::new("reg")
+                .args(["delete", AUTOSTART_KEY, "/v", AUTOSTART_VALUE, "/f"])
+                .creation_flags(0x0800_0000)
+                .status()
+                .map_err(err)?
+        };
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{}开机自启失败（注册表退出码 {:?}）",
+                if enabled { "写入" } else { "删除" },
+                status.code()
+            ))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("开机自启目前只支持 Windows".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 崩溃也要留证据：GUI 子系统没有控制台，panic 默认静默消失。
+    // 把 panic 信息写进 boot 日志，出事时至少能查到哪一行炸的。
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}", loc.file(), loc.line()))
+            .unwrap_or_else(|| "未知位置".to_string());
+        log_line(&format!("[panic] {location} :: {info}"));
+    }));
+
+    // --autostart-probe=on|off：不开窗口，只读写一次开机自启并记日志，方便回归。
+    if let Some(value) = std::env::args().find_map(|arg| {
+        arg.strip_prefix("--autostart-probe=")
+            .map(str::to_string)
+    }) {
+        let enable = value.trim() != "off";
+        let set = set_autostart(enable);
+        log_line(&format!(
+            "[autostart-probe] set({enable}) => {set:?}；now={}",
+            autostart_enabled()
+        ));
+        return;
+    }
+
     // --record-probe=<路径>:<秒数>：不开窗口，直接跑一次录制做帧率标定。
     // GUI 子系统没有控制台，结果写到 <路径>.log，退出码 0/1 表示成败。
     if let Some(value) = std::env::args().find_map(|arg| arg.strip_prefix("--record-probe=").map(str::to_string)) {
@@ -1200,7 +1318,7 @@ pub fn run() {
     // --quick：只把快捷浮窗叫出来（可配合开机自启，日常不用展开主窗）。
     let start_quick = std::env::args().any(|arg| arg == "--quick");
     log_line(&format!("[boot] run start_quick={start_quick}"));
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -1225,9 +1343,34 @@ pub fn run() {
             open_quick,
             close_quick,
             quick_action,
-            quick_main
+            quick_main,
+            app_info,
+            autostart_enabled,
+            set_autostart
         ])
+        .on_window_event(|window, event| {
+            // 关窗只收进托盘，不杀进程：抓屏、热键、录屏都要壳活着。
+            // 托盘没建起来时不拦，让用户的「关闭」真的关掉。
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let ready = TRAY_READY.load(std::sync::atomic::Ordering::Relaxed);
+                log_line(&format!(
+                    "[win] close label={} tray={ready}",
+                    window.label()
+                ));
+                if window.label() == "main" && ready {
+                    api.prevent_close();
+                    match window.hide() {
+                        Ok(()) => log_line("[win] 已收进托盘"),
+                        Err(error) => log_line(&format!("[win] 隐藏失败：{error}")),
+                    }
+                    let _ = window
+                        .app_handle()
+                        .emit("stillframe://tray-hint", "窗口已收进托盘，右键托盘图标可以退出");
+                }
+            }
+        })
         .setup(move |app| {
+            log_line("[setup] begin");
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -1282,6 +1425,7 @@ pub fn run() {
                             .emit("stillframe://shortcut-failed", "quick|Ctrl+Alt+Q");
                     }
                 }
+                log_line("[hotkey] 主键表注册完毕");
             }
             let _ = app.get_webview_window("main");
             log_line(&format!("[boot] start_quick={start_quick}"));
@@ -1291,8 +1435,115 @@ pub fn run() {
                     eprintln!("[stillframe] --quick 启动失败：{error}");
                 }
             }
+
+            // 托盘常驻：关窗不退出，左键点托盘或菜单「显示主窗口」都回到界面。
+            // 放到独立线程建：某些远程会话 / 无任务栏环境里托盘初始化会卡住系统调用，
+            // 卡在 setup 里就会让主窗永远不出来。建不起来就退化成「关窗即退出」。
+            #[cfg(desktop)]
+            {
+                let tray_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use tauri::menu::{Menu, MenuItem};
+                    use tauri::tray::{
+                        MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
+                    };
+
+                    // 这句要留：没有它，日志里看不到托盘线程是没跑到，还是卡在系统调用。
+                    log_line("[tray] 开始构建");
+                    let started = std::time::Instant::now();
+
+                    let tray = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || -> Result<(), String> {
+                            let app = &tray_handle;
+                            let show_item =
+                                MenuItem::with_id(app, "tray-show", "显示主窗口", true, None::<&str>)
+                                    .map_err(err)?;
+                            let snap_item =
+                                MenuItem::with_id(app, "tray-snap", "截一张", true, None::<&str>)
+                                    .map_err(err)?;
+                            let quick_item =
+                                MenuItem::with_id(app, "tray-quick", "快捷浮窗", true, None::<&str>)
+                                    .map_err(err)?;
+                            let quit_item =
+                                MenuItem::with_id(app, "tray-quit", "退出 定格", true, None::<&str>)
+                                    .map_err(err)?;
+                            let menu = Menu::with_items(
+                                app,
+                                &[&show_item, &snap_item, &quick_item, &quit_item],
+                            )
+                            .map_err(err)?;
+                            let icon = app
+                                .default_window_icon()
+                                .cloned()
+                                .ok_or("缺少应用图标，托盘图标无从取")?;
+
+                            let tray = TrayIconBuilder::with_id("stillframe-tray")
+                                .icon(icon)
+                                .tooltip("定格 Stillframe")
+                                .menu(&menu)
+                                .show_menu_on_left_click(false)
+                                .on_menu_event(|app, event| match event.id().as_ref() {
+                                    "tray-show" => {
+                                        if let Some(win) = app.get_webview_window("main") {
+                                            let _ = win.show();
+                                            let _ = win.unminimize();
+                                            let _ = win.set_focus();
+                                        }
+                                    }
+                                    // 托盘里点「截一张」：和全局热键同一条事件，前端自己开始拍
+                                    "tray-snap" => {
+                                        let _ = app.emit("stillframe://shortcut", "snap");
+                                    }
+                                    "tray-quick" => {
+                                        if let Err(error) = show_quick(app) {
+                                            log_line(&format!("[tray] 快捷浮窗失败：{error}"));
+                                        }
+                                    }
+                                    "tray-quit" => app.exit(0),
+                                    _ => {}
+                                })
+                                .on_tray_icon_event(|tray, event| {
+                                    if let TrayIconEvent::Click {
+                                        button: MouseButton::Left,
+                                        button_state: MouseButtonState::Up,
+                                        ..
+                                    } = event
+                                    {
+                                        let app = tray.app_handle();
+                                        if let Some(win) = app.get_webview_window("main") {
+                                            let _ = win.show();
+                                            let _ = win.unminimize();
+                                            let _ = win.set_focus();
+                                        }
+                                    }
+                                })
+                                .build(app)
+                                .map_err(err)?;
+                            // 托盘图标要活到进程结束：交给进程生命周期，不随函数栈回收
+                            std::mem::forget(tray);
+                            Ok(())
+                        },
+                    ));
+
+                    match tray {
+                        Ok(Ok(())) => {
+                            TRAY_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+                            log_line(&format!(
+                                "[tray] 已就绪（{}ms）：关窗收进托盘",
+                                started.elapsed().as_millis()
+                            ));
+                        }
+                        Ok(Err(error)) => log_line(&format!(
+                            "[tray] 建不起来（{}ms）：{error}；关窗即退出",
+                            started.elapsed().as_millis()
+                        )),
+                        Err(_) => log_line("[tray] 构建时崩溃，已跳过；关窗即退出"),
+                    }
+                });
+            }
             Ok(())
-        })
+        });
+    builder
         .run(tauri::generate_context!())
         .expect("启动 Stillframe 桌面壳失败");
 }

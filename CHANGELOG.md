@@ -1,5 +1,38 @@
 # 变更记录
 
+## v0.4 第十一批：桌面壳专业化——托盘常驻、开机自启、版本关于、崩溃日志（2026-11-28）
+
+### 新增：托盘常驻与「关窗不退出」
+
+- 托盘图标带四项菜单：显示主窗口 / 截一张 / 快捷浮窗 / 退出 定格；左键点图标直接唤回主窗，右键出菜单。
+- 关窗不再杀进程：主窗收起进托盘（截图、全局热键、录屏都要壳活着）。托盘没建起来的环境（无 shell、远程会话异常）就退回「关窗即退出」，不留幽灵进程。
+- 托盘构建放到独立线程，并在外面套 `catch_unwind`：初始化卡住或崩掉只少一个入口，不会把主窗一起拖死（这条是踩出来的——把初始化放在 setup 里，某些会话会卡到窗口始终不出现）。
+
+### 新增：设置面板「桌面壳」一节
+
+- 版本号、当前 exe 路径、开机自启勾选、关窗收托盘说明；「关于」里的版本号改成读宿主真实版本（以前是写死 `0.1.0`）。
+- 开机自启走 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`（值名 `Stillframe`，内容 `"<exe>" --quick`），开/关都不弹 UAC；勾选失败会把 checkbox 回读成真实状态并 toast，不装作成功。非 Windows 平台不显示这一项。
+- `--autostart-probe=on|off`：不开窗、不起事件循环，直接读写一次自启并写日志，方便脚本验证。
+
+### 新增：崩溃可见
+
+- `run()` 开头装 panic hook：GUI 子系统没有控制台，之前 panic 是「窗口一闪就没了」且无迹可查；现在把「位置 + 信息」写进 `%LOCALAPPDATA%\Temp\stillframe-boot.log`。
+
+### 修：单实例的写法把壳卡死
+
+- 把 `Builder::build()` 与 `App::run()` 拆成两步调用时，Windows 上事件循环初始化会卡住——`setup` 一行都没执行，日志停在 `[boot] run start`，进程却活着。改回链式 `builder.run(context)` 后一切正常。现已按链式保留，并在启动链路上留了三段日志（`run start` / `setup begin` / `start_quick`）便于下次定位。
+
+### 验证
+
+- `cargo build` 通过；真机链路：启动 → 主窗可见（标题 `Stillframe / 定格`）→ 发 `WM_CLOSE` → 进程存活、窗口隐藏（日志 `[win] 已收进托盘`）→ 再次启动 exe → 第二个进程立即退出、原窗口恢复可见、只剩 1 个进程。
+- 自启：`--autostart-probe=on` 后注册表出现 `"…stillframe-desktop.exe" --quick`，`now=true`；`--autostart-probe=off` 后值被删净，`now=false`。
+- 前端 `tsc --noEmit`、`vitest`（8 文件 64 条）、`npm run build` 均通过。
+
+### 未做
+
+- 正式安装包（NSIS/MSI）：需要 bundler 下载 NSIS 与 WiX，本机网络风险高，留到 v1.0。
+- 多屏 / 高 DPI 适配：当前按单屏主显示器坐标工作，混合 DPI 多屏下选区可能偏移。
+
 ## v0.4 第十批：浏览器插件 + 粘贴接图 + 隐藏窗口兜底 + 贴图上限可见（2026-11-28）
 
 ### 新增：浏览器插件（`extension/`）

@@ -376,3 +376,37 @@ export async function nativeClearAnnotation(): Promise<void> {
     // 忽略
   }
 }
+
+export interface HostInfo {
+  version: string;
+  platform: string;
+  exe: string;
+}
+
+/** 桌面壳的版本与程序路径；网页端返回 null。 */
+export async function nativeAppInfo(): Promise<HostInfo | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  try {
+    return (await invoke('app_info')) as HostInfo;
+  } catch {
+    return null;
+  }
+}
+
+/** 开机自启是否已写进注册表；非 Windows 恒为 false。 */
+export async function nativeAutostartEnabled(): Promise<boolean> {
+  const invoke = desktopInvoke();
+  if (!invoke) return false;
+  try {
+    return Boolean(await invoke('autostart_enabled'));
+  } catch {
+    return false;
+  }
+}
+
+export async function nativeSetAutostart(enabled: boolean): Promise<void> {
+  const invoke = desktopInvoke();
+  if (!invoke) throw new Error('只有桌面端才能设置开机自启');
+  await invoke('set_autostart', { enabled });
+}

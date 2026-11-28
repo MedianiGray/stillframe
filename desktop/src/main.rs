@@ -31,7 +31,9 @@ fn already_running() -> bool {
 fn main() {
     // 自检入口（--record-probe）不是给人用的窗口，不受单实例限制：
     // 主程序开着时也能跑抓帧回归，否则 CI / 脚本会静默什么都不做
-    let probe = std::env::args().any(|arg| arg.starts_with("--record-probe"));
+    let probe = std::env::args().any(|arg| {
+        arg.starts_with("--record-probe") || arg.starts_with("--autostart-probe")
+    });
     #[cfg(windows)]
     if !probe && already_running() {
         return;

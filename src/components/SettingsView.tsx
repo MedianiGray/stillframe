@@ -1,8 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { FolderOpen, Save, Trash2 } from 'lucide-react';
 import type { Settings, TranslateProvider } from '../lib/settings';
 import { autosaveSupported, chooseDirectory, clearDirectory, currentDirectoryName } from '../lib/autosave';
-import { isDesktop } from '../lib/desktop';
+import {
+  hostKind,
+  isDesktop,
+  nativeAppInfo,
+  nativeAutostartEnabled,
+  nativeSetAutostart,
+  type HostInfo,
+} from '../lib/desktop';
 import { useToast } from './Toasts';
 
 interface SettingsViewProps {
@@ -21,6 +28,27 @@ export function SettingsView({ settings, onSave }: SettingsViewProps) {
   const toast = useToast();
   const [draft, setDraft] = useState<Settings>(settings);
   const [dirName, setDirName] = useState<string | null>(currentDirectoryName());
+  const desktopShell = hostKind() === 'tauri';
+  const [host, setHost] = useState<HostInfo | null>(null);
+  const [autostart, setAutostart] = useState(false);
+
+  useEffect(() => {
+    if (!desktopShell) return;
+    void nativeAppInfo().then(setHost);
+    void nativeAutostartEnabled().then(setAutostart);
+  }, [desktopShell]);
+
+  const toggleAutostart = async (next: boolean) => {
+    try {
+      await nativeSetAutostart(next);
+      setAutostart(next);
+      toast(next ? '已设为开机自启：登录后拉起快捷浮窗' : '已取消开机自启', 'ok');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '设置开机自启失败', 'warn');
+      // 写失败就别假装成功，回读一次真实状态
+      void nativeAutostartEnabled().then(setAutostart);
+    }
+  };
 
   const patch = <K extends keyof Settings>(key: K, value: Settings[K]) => {
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -221,13 +249,36 @@ export function SettingsView({ settings, onSave }: SettingsViewProps) {
           </p>
         </section>
 
+        {desktopShell ? (
+          <section className="panel p-4">
+            <span className="label">桌面壳</span>
+            <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[12px] text-paper/75">
+              <span>版本 {host?.version ?? '—'}</span>
+              <span className="break-all font-mono text-[10px] text-muted">{host?.exe}</span>
+            </div>
+            <label className="mt-3 flex items-center gap-2 text-[12px] text-muted">
+              <input
+                type="checkbox"
+                className="accent-amber"
+                checked={autostart}
+                onChange={(event) => void toggleAutostart(event.target.checked)}
+              />
+              开机自启：登录后只拉起快捷浮窗，日常按 Ctrl+Alt+Q 呼出
+            </label>
+            <p className="mt-2 text-[11px] leading-5 text-muted">
+              关掉窗口只会收进系统托盘，抓屏与热键仍然可用；要真正退出请右键托盘图标选「退出 定格」。
+              托盘图标建不起来时（例如某些远程会话），关窗就是退出。
+            </p>
+          </section>
+        ) : null}
+
         <section className="panel p-4">
           <span className="label">关于</span>
           <p className="mt-2 text-[12px] leading-6 text-paper/75">
             定格 / Stillframe 是一个屏幕捕捉工具箱，包含区域截图、滚动长图、区域录屏、本地取字与屏幕翻译。
             网页端受浏览器沙箱限制，桌面端与移动端的原生实现放在同一个仓库里，可自行编译。
           </p>
-          <p className="mt-2 font-mono text-[10px] text-muted">MIT License · 0.1.0</p>
+          <p className="mt-2 font-mono text-[10px] text-muted">MIT License · {host?.version ?? '0.1.0'}</p>
         </section>
       </div>
     </div>
