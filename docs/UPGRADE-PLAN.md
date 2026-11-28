@@ -412,6 +412,20 @@
 
 **自检**：`--record-probe=<mp4>:<秒>` 出片并打印 `backend=gdi`；`tools/shell-selfcheck.mjs` 过一遍命令面，建窗类拆成 `--windows=quick|pin`（主窗被完全遮挡后 WebView2 会挂起主窗 JS，后续 invoke 全超时）。
 
+### 5.13 录制启动就绪门控（G15，已落地）
+
+**问题**：5.12 只解决了「抓帧后端在异常会话下吐不出帧」。解锁后的真实界面路径仍有 0 字节成片——`start_recording` 是同步命令，`spawn` 录制线程后立即返回，而线程真正就绪（建抓帧器、起 FFmpeg 管线、建标注图层）要十几秒。前端从 invoke 返回就开始计秒，用户点「结束录制」时线程刚进循环，`stop` 已经是 true，一帧没录。日志只有 `frames=0 elapsed=0.003`。`--record-probe` 因为有 `seconds_limit` 会把启动耗时算进去，所以一直「看起来正常」。
+
+**方案**：
+1. `start_recording` 改 `#[tauri::command] async fn`。新建 `Arc<AtomicU64> progress` 交给线程，`record_loop` 每 `push_frame` 一次就 `fetch_add(1)`；命令侧每 100ms 轮询，等到 `progress > 0` 才把 `Recording` 写入槽位并返回。上限 20 秒：超时则置 `stop`、`join`、回「录制启动超时：20 秒内没录到第一帧」；若 `handle.is_finished()` 表明线程已退出，`join` 取它自己的错误原样返回，不留空文件。
+2. 槽位自清理：进命令先看 `slot` 里的 handle 是否已 `is_finished()`，已结束就清空重来，否则才报「已经在录制」；出首帧后二次检查再写入，避免并发插入。
+3. 前端 `RecordPanel` 增加 `preparing` 态：准备期按钮禁用并显示「准备中…」；`catch` 用 `String(error)` 显示 Tauri 抛回的裸字符串错误，不再统一吞成「无法开始原生录制」。
+4. `record_loop` 补诊断日志（起录参数、收到停止信号、到时收尾、抓帧失败原文、每 30 帧的抓帧耗时），排障不必再猜。
+
+**自检**：`tools/shell-probe.mjs --flow=record` 已把「固定 sleep 后点停止」改成轮询等「结束录制」出现（40 秒上限）再录 6 秒；新增 `tools/shell-shots.mjs` 用 `page.screenshot` 逐模块留界面证据。真机两次：准备 13.2s → 251 帧 / 8.37s / 21.3fps / `dxgi+h264_qsv`（ffprobe 1152×540、251 帧、8.3667s，抽帧是真实桌面）；205 帧 / 6.834s。
+
+**遗留**：录屏面板在 1180 CSS px 宽视口（1.25 缩放窗口刚退出全屏的中间态）下说明文案横向溢出被裁，真实窗口尺寸下未复现，待窗口尺寸稳定后复看。
+
 ## 6 质量与验收
 
 ### 6.1 单元测试

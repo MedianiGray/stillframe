@@ -90,6 +90,9 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
   const [voiceOn, setVoiceOn] = useState(false);
   // 桌面壳走原生 30 帧管线；网页端仍用画布 + MediaRecorder
   const [nativeRecording, setNativeRecording] = useState(false);
+  // 「开始录制」到真正出第一帧之间要等抓帧器与编码器起来（低配机能等十几秒）。
+  // 这段时间按钮要明确说「准备中」，否则用户以为没点上，会反复点。
+  const [preparing, setPreparing] = useState(false);
   const [nativeDone, setNativeDone] = useState<NativeRecordingStats | null>(null);
 
   const nativeCapable = hostKind() === 'tauri';
@@ -266,6 +269,7 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
     // 桌面壳：交给 Rust 抓帧 + FFmpeg。WebView 里轮询抓屏只有个位数帧率，
     // 那条路在桌面端录不出可交付的片子（见 docs/UPGRADE-PLAN.md 5.2）。
     if (nativeCapable) {
+      setPreparing(true);
       try {
         // 录制要的是屏幕绝对坐标：选区来自冻结帧（图内坐标），加上这块屏的原点。
         // 副屏原点非 0，漏掉这一步就会录到主屏上同一位置那块区域。
@@ -298,7 +302,11 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
           'ok',
         );
       } catch (error) {
-        toast(error instanceof Error ? error.message : '无法开始原生录制', 'warn');
+        // Tauri 的 Err(String) 抛回来是裸字符串，不是 Error 实例；
+        // 只认 instanceof 会把它换成「无法开始原生录制」，把真正的原因（预检、超时、已在录制）吞掉。
+        toast(error instanceof Error ? error.message : String(error), 'warn');
+      } finally {
+        setPreparing(false);
       }
       return;
     }
@@ -643,11 +651,12 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
             {!recording ? (
               <button
                 type="button"
-                className="ml-0.5 flex h-[30px] items-center gap-1 rounded-[2px] bg-[#12B7F5] px-2.5 text-[12px] font-medium text-[#04212E] hover:bg-[#3AC5FA]"
+                disabled={preparing}
+                className="ml-0.5 flex h-[30px] items-center gap-1 rounded-[2px] bg-[#12B7F5] px-2.5 text-[12px] font-medium text-[#04212E] hover:bg-[#3AC5FA] disabled:cursor-wait disabled:opacity-70"
                 onClick={() => void begin()}
               >
                 <Play size={13} strokeWidth={2.2} />
-                {QQ_TEXT.recordStart}
+                {preparing ? '准备中…' : QQ_TEXT.recordStart}
               </button>
             ) : (
               <button

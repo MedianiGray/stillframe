@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 桌面壳前端验收：通过 WebView2 的 CDP 端点接管真实窗口，检查渲染与关键交互。
  *
  * 用法：
@@ -24,7 +24,11 @@ const flow = process.argv.find((arg) => arg.startsWith('--flow='))?.slice('--flo
 
 const browser = await chromium.connectOverCDP(endpoint);
 const context = browser.contexts()[0];
-const page = context.pages()[0];
+// 不能取 pages()[0]：一旦开着快捷浮窗或贴图，先注册的 target 是 quick.html / pin.html，
+// 后面的选择器全会落在那两个迷你页面上，报出来的错还对不上真实原因。
+const page =
+  context.pages().find((p) => p.url().includes('tauri.localhost') && !/quick|pin/.test(p.url())) ??
+  context.pages()[0];
 const errors = [];
 page.on('console', (msg) => {
   if (msg.type() === 'error') errors.push(msg.text());
@@ -46,8 +50,17 @@ const snap = async (label, target = page, limit = 240) => {
   console.log(label, JSON.stringify(info));
 };
 
-/** 回到待机首页：切回截图模式，再按 Esc 退掉残留的选区层 / 结果面板。 */
+/**
+ * 回到待机首页：先 reload 复位。
+ * 标注台 / 取字结果 / 录屏面板都是整窗替换的视图，左侧导航此时根本不在 DOM 里，
+ * 靠点「截图」或按 Esc 退不可靠（Esc 在标注台里只清选区）。reload 一步到位。
+ */
 const goHome = async () => {
+  if (!(await page.getByRole('button', { name: '开始捕捉' }).count())) {
+    await page.reload();
+    await page.waitForTimeout(1600);
+    if (await page.getByRole('button', { name: '开始捕捉' }).count()) return;
+  }
   if (!(await page.getByRole('button', { name: '开始捕捉' }).count())) {
     await page.getByRole('button', { name: '截图', exact: true }).click();
     await page.waitForTimeout(800);
@@ -131,14 +144,28 @@ if (flow === 'snap' || flow === 'full' || flow === 'ocr' || flow === 'record' ||
       (await page.evaluate(() => window.innerWidth)) * 0.45,
       (await page.evaluate(() => window.innerHeight)) * 0.45,
     );
-    await page.waitForTimeout(2200);
+    await page.waitForTimeout(2600);
     await snap('REC_PANEL');
+    const startedAt = Date.now();
     await page.getByRole('button', { name: /开始录制/ }).first().click();
-    await page.waitForTimeout(4200);
+    // 「开始录制」要先等抓帧器与编码器起来才真正出帧（低配机上十几秒），
+    // 这段时间按钮写的是「准备中…」。固定 sleep 会踩空：停止时线程才刚起，成片 0 字节。
+    let live = false;
+    for (let i = 0; i < 80; i += 1) {
+      await page.waitForTimeout(500);
+      if (/结束录制/.test(await page.locator('body').innerText())) {
+        live = true;
+        console.log(`RECENT_AFTER_MS ${Date.now() - startedAt}`);
+        break;
+      }
+    }
+    if (!live) console.log('REC_NEVER_STARTED');
+    // 录够 6 秒再停，留出可校验的时长
+    await page.waitForTimeout(6000);
     await snap('RECORDING', page, 200);
     // 停止按钮的文案是「结束录制」不是「停止」，别按 /停止/ 去找。
     await page.getByRole('button', { name: /结束录制|停止录制/ }).first().click();
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(3500);
     await snap('REC_STOPPED', page, 260);
   } else if (flow === 'scroll') {
     await dragBox(0.2, 0.2, 0.7, 0.7);
@@ -195,4 +222,5 @@ if (flow === 'quick') {
 }
 
 if (errors.length) console.log('ERRORS', JSON.stringify(errors.slice(0, 6)));
-await browser.close();
+// 不能 close：connectOverCDP 的 close 会把宿主窗口一起关掉，壳就退出了。
+// 直接退出 node 即可，WebView 与调试端口都留着。

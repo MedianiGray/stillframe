@@ -1050,6 +1050,8 @@ fn record_loop(
     system: bool,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     seconds_limit: Option<f64>,
+    // 已录帧数。start_recording 靠它判断「线程真的开始出帧了」，见那里的说明。
+    progress: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<recorder::RecordingStats, String> {
     let _timer = win_capture::TimerResolution::new();
     let (screen_w, screen_h) = win_capture::screen_size();
@@ -1102,22 +1104,42 @@ fn record_loop(
     ));
 
     let started = std::time::Instant::now();
+    // 这一段是排障要用的：录制「看起来在录、成片 0 字节」时，光看结尾的 frames=0
+    // 分不出是没拿到帧、还是循环压根没跑。起录参数与退出原因都留一行。
+    log_line(&format!(
+        "[record] 起录 crop=({},{},{},{}) size={}x{} fps={fps} backend={}",
+        crop.0,
+        crop.1,
+        crop.2,
+        crop.3,
+        width,
+        height,
+        grabber.backend()
+    ));
     // 标注画布：抓帧缓冲本来就是 BGRA，拷进 32 位 DIB 后直接用 GDI 画，
     // 没有标注活动时整段跳过，不白拷一遍像素。
     let mut layer = win_annot::Layer::new(width, height).ok();
     loop {
         if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            log_line(&format!("[record] 收到停止信号，已录 {} 帧", encoder.frames()));
             break;
         }
         if let Some(limit) = seconds_limit {
             // 时间与帧数双闸：补帧会让帧数偶尔超前节拍，只看时钟会实录超长
             let max_frames = (limit * fps as f64).round().max(1.0) as u64;
             if encoder.frames() >= max_frames || started.elapsed().as_secs_f64() >= limit {
+                log_line(&format!("[record] 到时收尾，已录 {} 帧", encoder.frames()));
                 break;
             }
         }
         let t0 = std::time::Instant::now();
-        let frame = grabber.grab()?;
+        let frame = match grabber.grab() {
+            Ok(frame) => frame,
+            Err(error) => {
+                log_line(&format!("[record] 抓帧失败：{error}"));
+                return Err(error);
+            }
+        };
         encoder.note_grab(t0.elapsed());
         let now_ms = started.elapsed().as_secs_f64() * 1000.0;
         let (anns, laser) = snapshot_record_annotations();
@@ -1133,6 +1155,14 @@ fn record_loop(
             _ => frame,
         };
         encoder.push_frame(pixels)?;
+        progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if encoder.frames() % 30 == 1 {
+            log_line(&format!(
+                "[record] frames={} grab={:.1}ms",
+                encoder.frames(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            ));
+        }
         pace_frame(&mut encoder, pixels, started, fps)?;
     }
     // 尾巴补齐：按真实跑秒数把缺的帧补上，避免成片比实际录制短
@@ -1165,6 +1195,7 @@ fn record_loop(
     _system: bool,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     seconds_limit: Option<f64>,
+    progress: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<recorder::RecordingStats, String> {
     let monitors = xcap::Monitor::all().map_err(err)?;
     let monitor = monitors.into_iter().next().ok_or("没有检测到显示器")?;
@@ -1225,6 +1256,7 @@ fn record_loop(
         let frame = recorder::crop_rgba(&raw, screen_w, screen_h, crop.0, crop.1, width, height)?;
         encoder.note_grab(t0.elapsed());
         encoder.push_frame(&frame)?;
+        progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         pace_frame(&mut encoder, &frame, started, fps)?;
     }
     encoder.mark_end();
@@ -1259,16 +1291,24 @@ fn resolve_ffmpeg(explicit: Option<String>) -> String {
 }
 
 #[tauri::command]
-fn start_recording(
+async fn start_recording(
     rect: Option<RecordRect>,
     fps: Option<u32>,
     ffmpeg: Option<String>,
     mic: Option<bool>,
     system: Option<bool>,
 ) -> Result<String, String> {
-    let mut slot = recording_slot().lock().map_err(err)?;
-    if slot.is_some() {
-        return Err("已经在录制，先结束当前这段".to_string());
+    // 上一段如果线程已经退出（抓帧失败 / 编码器起不来），槽位不能一直占着，
+    // 否则之后每次点「开始录制」都只拿到「已经在录制」。
+    {
+        let mut slot = recording_slot().lock().map_err(err)?;
+        if let Some(rec) = slot.as_ref() {
+            if rec.handle.is_finished() {
+                *slot = None;
+            } else {
+                return Err("已经在录制，先结束当前这段".to_string());
+            }
+        }
     }
     let fps = fps.unwrap_or(30).clamp(5, 60);
     // 先确认整屏能取到画面：锁屏 / 远程会话断开 / 显示器休眠时录出来是纯色，
@@ -1300,6 +1340,8 @@ fn start_recording(
     } else {
         None
     };
+    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let thread_progress = progress.clone();
     let handle = std::thread::spawn(move || {
         record_loop(
             rect,
@@ -1310,9 +1352,45 @@ fn start_recording(
             system.unwrap_or(false),
             thread_stop,
             None,
+            thread_progress,
         )
     });
-    *slot = Some(Recording { stop, handle });
+
+    // 起录即就绪：线程要先建 DXGI 抓帧器、起 FFmpeg 管线，低配机上这一段能吃掉十几秒。
+    // 不等它出第一帧就返回，前端会从一个「还没录」的状态开始跑秒表，
+    // 用户点停止时线程才刚开始，成片就是 0 字节（日志里 elapsed=0.003 那次就是）。
+    // 最多等 20 秒；等不到就把话说明白，而不是留一段空文件给用户。
+    let mut waited_ms = 0u32;
+    while progress.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        if handle.is_finished() {
+            let result = handle.join().map_err(|_| "录制线程异常退出".to_string())?;
+            return Err(match result {
+                Ok(stats) => format!("录制线程提前结束：只有 {} 帧", stats.frames),
+                Err(message) => message,
+            });
+        }
+        if waited_ms >= 20_000 {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = handle.join();
+            return Err(
+                "录制启动超时：20 秒内没录到第一帧。多半是取不到屏幕画面，检查是否锁屏或远程会话断开"
+                    .to_string(),
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        waited_ms += 100;
+    }
+
+    // 出首帧之后才把这一段交给 stop_recording，此时停止一定能收到真实的帧。
+    {
+        let mut slot = recording_slot().lock().map_err(err)?;
+        if slot.is_some() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = handle.join();
+            return Err("已经在录制，先结束当前这段".to_string());
+        }
+        *slot = Some(Recording { stop, handle });
+    }
     Ok(out.to_string_lossy().to_string())
 }
 
@@ -1574,6 +1652,7 @@ pub fn run() {
             probe_system,
             stop,
             Some(seconds),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         );
         let report = match &result {
             Ok(stats) => format!(

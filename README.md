@@ -60,7 +60,7 @@
 | 区域截图 | ✅ 每次授权屏幕共享 | ✅ 系统截屏接口，免授权 | ✅ MediaProjection + 前台服务 | ⚠️ 仅相册导入 |
 | 标注 / 导出 | ✅ | ✅ | ✅ | ✅ |
 | 滚动长截图 | ✅ | ✅ | ✅ | ⚠️ 仅拼接相册图 |
-| 区域录屏 | ⚠️ 网页端只能 WebM，30fps | ✅ 原生直出 MP4，1080p 60 秒实测 28–30fps、丢帧 <1%；可带麦克风，系统声走 WASAPI 环回（两路可同时）；录屏条标注逐帧烧进成片 | ⚠️ 原生抓帧约 3fps | ⚠️ 受限 |
+| 区域录屏 | ⚠️ 网页端只能 WebM，30fps | ✅ 原生直出 MP4，1080p 60 秒实测 28–30fps、丢帧 <1%；可带麦克风，系统声走 WASAPI 环回（两路可同时）；录屏条标注逐帧烧进成片。点「开始录制」后要先等首帧就绪（界面显示「准备中…」，实测 3–13 秒），`REC` 亮起才是真的在录 | ⚠️ 原生抓帧约 3fps | ⚠️ 受限 |
 | 提取文字 | ✅ | ✅ | ✅ | ✅ |
 | 屏幕翻译 | ✅ 需自备 API Key | ✅ | ✅ | ✅ |
 | 贴图钉屏 | ❌ 不能置顶 | ✅ 独立置顶窗口 | ✅ 悬浮窗（需授权） | ❌ |
@@ -150,15 +150,20 @@ node tools\shell-selfcheck.mjs                     # 命令级：抓屏/落盘/�
 node tools\shell-selfcheck.mjs --windows=pin       # 建窗类一次只验一项
 node tools\shell-selfcheck.mjs --windows=quick
 node tools\shell-probe.mjs --flow=snap             # 交互级：全屏→抓帧→拖框→双击→标注台
+node tools\shell-probe.mjs --flow=record           # 交互级：录屏→框选→面板→等 REC→录 6 秒→结束
+node tools\shell-shots.mjs --out=./shots --only=snap,set,ocr,record,quick,pin  # 逐模块拍界面
 ```
 
 几个真会踩到的点，写在这里省下一次排查：
 
 - **白屏**：`cargo build` 不走 tauri CLI 时必须带 `--features custom-protocol`，否则 `devUrl` 还指着 `127.0.0.1:24118`，没有 dev server 就是一块白板。改了前端要先 `npm run build`。
 - **建窗类命令要 async**：`WebviewWindowBuilder::build()` 在主线程会自锁（浮窗永远不出来）。`open_quick` 是 async，热键/托盘路径用 `tauri::async_runtime::spawn`。
+- **`start_recording` 也要等**：它现在会等到第一帧真正写进编码器才返回（最多 20 秒），前端在这段时间显示「准备中…」。别把「点了按钮」当成「已经开始录」；停止时机以 `REC` 出现为准，脚本里用轮询等「结束录制」，不要固定 sleep。
 - **主窗被完全遮挡后 invoke 会超时**：WebView2 会把被遮挡窗口的 JS 挂起。建窗类自检因此拆成 `--windows=quick|pin`，一次一项。
 - **`save_png` 会弹系统另存对话框**，自动化里不要调；落盘能力看 `write_shot`（同一条写文件代码）。
 - **屏幕没内容时录屏会被拒**：锁屏 / 远程会话断开 / 显示器休眠时整屏是纯色，`start_recording` 会直接回可读原因；`--capture-probe=<png>` 可以先看一眼抓到的到底是什么。
+- **别在 CDP 模式下 `browser.close()`**：它会把宿主窗口一起关掉，壳跟着退出；验收脚本结尾只退出 Node。
+- **主窗要按 URL 挑**：开着快捷浮窗/贴图时 `context.pages()[0]` 可能是 `quick.html`，选择器全落空。
 
 ## 与 QQ 截图模块的对照
 
