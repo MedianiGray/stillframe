@@ -1,5 +1,5 @@
 import { canvasFromSource } from './image';
-import { nativeCaptureScreen } from './desktop';
+import { nativeCaptureFrame, nativeCaptureScreen } from './desktop';
 
 /**
  * 帧来源。浏览器是真实的 MediaStream + video 元素；
@@ -11,6 +11,11 @@ export interface CaptureSource {
   audioTracks: MediaStreamTrack[];
   stop: () => void;
   stream?: MediaStream;
+  /**
+   * 画面左上角在虚拟桌面上的物理坐标（默认 0,0）。
+   * 副屏不是从主屏原点起算的：选区换算成屏幕坐标、注入滚轮、判断自身窗口遮挡都要用它。
+   */
+  origin?: { x: number; y: number };
 }
 
 /** 兼容旧名字：滚动拼接与录屏面板都按这个契约取帧。 */
@@ -78,15 +83,21 @@ export async function openScreenSession(options: ScreenOptions = {}): Promise<Ca
  */
 export async function openNativeSession(options: NativeOptions = {}): Promise<CaptureSource> {
   const intervalMs = Math.max(120, options.intervalMs ?? 320);
-  const first = await nativeCaptureScreen();
-  if (!first) throw new Error('原生宿主不可用');
-
+  // 先按鼠标所在屏抓第一帧，之后钉住这块屏（display id）：轮询途中鼠标挪到别的屏，
+  // 画面不能跟着跳，否则长图拼接与录制选区全错位。
+  // capture_frame 是后加的命令，老壳没有就退回只抓画面（origin 按 0,0 处理）。
+  const first = await nativeCaptureFrame().catch(() => null);
+  const fallback = first ? null : await nativeCaptureScreen();
+  if (!first && !fallback) throw new Error('原生宿主不可用');
   const canvas = document.createElement('canvas');
-  canvas.width = first.width;
-  canvas.height = first.height;
+  const image = first?.canvas ?? fallback!;
+  canvas.width = image.width;
+  canvas.height = image.height;
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('无法创建画布上下文');
-  ctx.drawImage(first, 0, 0);
+  ctx.drawImage(image, 0, 0);
+  const displayId = first?.display?.id;
+  const origin = { x: first?.display?.x ?? 0, y: first?.display?.y ?? 0 };
 
   let stopped = false;
   let busy = false;
@@ -94,7 +105,8 @@ export async function openNativeSession(options: NativeOptions = {}): Promise<Ca
     if (stopped || busy) return;
     busy = true;
     try {
-      const frame = await nativeCaptureScreen();
+      const grabbed = await nativeCaptureFrame(displayId);
+      const frame = grabbed?.canvas ?? null;
       if (!frame || stopped) return;
       // 分辨率变化（换屏/旋转）时按新尺寸重置，避免拉伸。
       if (frame.width !== canvas.width || frame.height !== canvas.height) {
@@ -112,6 +124,7 @@ export async function openNativeSession(options: NativeOptions = {}): Promise<Ca
   return {
     video: canvas,
     audioTracks: [],
+    origin,
     stop: () => {
       stopped = true;
       window.clearInterval(timer);

@@ -236,7 +236,8 @@ export function CaptureWorkspace({
     return () => window.removeEventListener('paste', onPaste);
   }, [openLocalImage]);
 
-  const start = async (target: ToolMode) => {    setLoading(true);
+  const start = async (target: ToolMode) => {
+    setLoading(true);
     const singleFrame = target === 'snap' || target === 'ocr' || target === 'translate';
     try {
       if (isDesktop()) {

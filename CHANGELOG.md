@@ -1,5 +1,38 @@
 # 变更记录
 
+## v0.4 第十二批：多屏与混合 DPI——抓帧带几何、录制按虚拟桌面（2026-11-28）
+
+### 新增：抓屏知道自己抓的是哪块屏
+
+- `capture_frame`：选屏顺序「显式 display id → 鼠标所在屏 → 主屏」，返回 `{ dataUrl, display }`，`display` 带 id / 名称 / 原点（副屏在左时为负）/ 物理尺寸 / 缩放 / 是否主屏。`capture_screen` 保留原签名（只回图像），Android 桥与旧调用不用改。
+- `displays`：列全部显示器，前端的诊断面板与后续「选屏截图」都靠它。
+- 前端 `nativeCaptureFrame` / `nativeDisplays`：`CaptureSource` 新增 `origin`；长图与录屏会话**首帧按鼠标屏抓、之后钉住这个 display id**——轮询中途鼠标挪到别的屏，画面不再跟着跳。
+
+### 修：录制与滚轮注入的坐标系
+
+- `ScreenGrabber` 按虚拟桌面 clamp，`BitBlt` 源坐标减去虚拟桌面原点：以前 `x.max(0)` 把副屏的负坐标夹成 0，录出来是主屏左上角那块。
+- `DxgiGrabber` 按选区起点遍历 `EnumOutputs` 匹配输出，用该输出的 `DesktopCoordinates` 算局部裁剪与 staging 纹理尺寸；以前恒用 `EnumOutputs(0)`（主输出），录副屏必错。
+- `RecordRect.x/y` 改 `i32`（负坐标合法），`record_loop` 按虚拟桌面 clamp；非 Windows 路径仍只按主屏局部坐标裁，代码里注明了限制。
+- 前端三处补原点：`RecordPanel` 的录制 rect、`ScrollPanel` 的遮挡判断（`shadowsCapture` 新增 `offset`）与滚轮注入点。
+
+### 新增：两条自检入口
+
+- `--displays-probe`：不开窗，把每块屏的 id / 名称 / 原点 / 尺寸 / 缩放 / 主屏标记写进 boot 日志。
+- `--capture-probe=<png>`：不开窗，抓一张屏落盘，同时打印「显示器报告尺寸、虚拟桌面、实际图像像素」三者，高 DPI 与多屏偏移的回归全靠这一条。
+
+### 验证
+
+- `cargo build` 通过（余 3 条历史警告：`ScreenGrabber::width/height`、`DxgiGrabber::staging`、`recorder::crop_rgba`，均属预留/旧路径，不影响运行）。
+- 本机（单屏 1920×1080）：`--displays-probe` → `count=1 origin=(0,0) size=1920x1080 primary=true`；`--capture-probe` → 报告 1920×1080、虚拟桌面 1920×1080、实图 1920×1080，三者一致，画面正常（非黑屏）。
+- 录制回归：`--probe-rect=200,150,640,360` 5 秒 → 640×360 / 30fps / dxgi；`--probe-rect=-150,-120,640,360`（故意给负坐标）4 秒 → 正常出片，clamp 未崩。
+- 前端 `tsc --noEmit`、`vitest run tests`（8 文件 64 条）、`npm run build` 通过。
+
+### 未做
+
+- 截图覆盖层仍是主窗内容区的缩放视图（窗口内看整屏），副屏上按快捷键不会把窗口挪到副屏全屏——下一批做「窗口跟随鼠标所在屏」。
+- 混合 DPI（125%/150% 混排）只有坐标换算通路自洽（选区按 frame 物理像素 → 加屏原点），本机单屏无法真机复现，需双屏机器验收。
+- 正式安装包（NSIS/MSI）仍等 bundler 联网下载。
+
 ## v0.4 第十一批：桌面壳专业化——托盘常驻、开机自启、版本关于、崩溃日志（2026-11-28）
 
 ### 新增：托盘常驻与「关窗不退出」

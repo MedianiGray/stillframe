@@ -71,6 +71,59 @@ function dataUrlToCanvas(dataUrl: string): Promise<HTMLCanvasElement> {
   });
 }
 
+/** 一块显示器：origin 是它在虚拟桌面上的物理坐标（副屏在左时为负）。 */
+export interface HostDisplay {
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scale: number;
+  primary: boolean;
+}
+
+/** 桌面上所有显示器；浏览器与 Android 返回空数组。 */
+export async function nativeDisplays(): Promise<HostDisplay[]> {
+  const invoke = desktopInvoke();
+  if (!invoke) return [];
+  try {
+    const rows = await invoke('displays');
+    return Array.isArray(rows) ? (rows as HostDisplay[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 抓一块屏（不给 id 就是鼠标所在屏），并带回这块屏的几何。
+ * 前端靠 display 的 x/y 把「图内坐标」换成「屏幕绝对坐标」：
+ * 副屏不是从 (0,0) 起算的，录制选区、滚轮注入、遮挡判断都要加这个原点。
+ */
+export async function nativeCaptureFrame(
+  display?: number,
+): Promise<{ canvas: HTMLCanvasElement; display: HostDisplay } | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const payload = (await invoke('capture_frame', { display })) as
+    | { dataUrl?: string; display?: HostDisplay }
+    | null;
+  if (!payload || typeof payload.dataUrl !== 'string' || !payload.dataUrl.startsWith('data:image')) {
+    throw new Error('原生命令没有返回图像');
+  }
+  const displayInfo: HostDisplay = payload.display ?? {
+    id: 0,
+    name: '',
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+    scale: 1,
+    primary: true,
+  };
+  return { canvas: await dataUrlToCanvas(payload.dataUrl), display: displayInfo };
+}
+
 /** 原生整屏抓帧。浏览器环境返回 null。 */
 export async function nativeCaptureScreen(): Promise<HTMLCanvasElement | null> {
   const bridge = androidBridge();

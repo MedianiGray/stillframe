@@ -23,7 +23,8 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, DXGI_OUTDUPL_FRAME_INFO,
+    IDXGIDevice, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
@@ -34,7 +35,10 @@ use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+};
 
 /// 只调一次：进程级 DPI 感知。Tauri 正常启动时自己会设，但 `--record-probe`
 /// 不进 Tauri 那条路，得在这里补上，否则抓到的画面是按缩放后的逻辑尺寸裁的。
@@ -52,6 +56,19 @@ pub fn screen_size() -> (u32, u32) {
         let w = GetSystemMetrics(SM_CXSCREEN).max(1) as u32;
         let h = GetSystemMetrics(SM_CYSCREEN).max(1) as u32;
         (w, h)
+    }
+}
+
+/// 虚拟桌面：多屏拼接后的大矩形，原点可能在负坐标（副屏摆到主屏左侧时）。
+/// 所有屏幕绝对坐标都落在这个矩形里，是抓帧与选区换算的统一基准。
+pub fn virtual_screen() -> (i32, i32, u32, u32) {
+    ensure_dpi_aware();
+    unsafe {
+        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let w = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1) as u32;
+        let h = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1) as u32;
+        (x, y, w, h)
     }
 }
 
@@ -86,17 +103,21 @@ pub struct ScreenGrabber {
     height: u32,
     x: i32,
     y: i32,
+    /// 虚拟桌面原点。`GetDC(None)` 的 DC 覆盖整块虚拟桌面，其 (0,0) 就是这里，
+    /// 所以 BitBlt 的源坐标要减去它——副屏摆在主屏左侧时 x 为负，这一步不能省。
+    vx: i32,
+    vy: i32,
 }
 
 impl ScreenGrabber {
-    /// 抓主屏上 `(x, y, width, height)` 这块，宽高按偶数收（libx264 的 yuv420p 要求）。
+    /// 抓虚拟桌面上 `(x, y, width, height)` 这块（绝对坐标，可为负），宽高按偶数收。
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, String> {
         ensure_dpi_aware();
-        let (sw, sh) = screen_size();
-        let x = x.max(0).min(sw.saturating_sub(2) as i32);
-        let y = y.max(0).min(sh.saturating_sub(2) as i32);
-        let width = (width.max(2)) & !1;
-        let height = (height.max(2)) & !1;
+        let (vx, vy, vw, vh) = virtual_screen();
+        let x = x.max(vx).min(vx + vw as i32 - 2);
+        let y = y.max(vy).min(vy + vh as i32 - 2);
+        let width = (width.max(2) & !1).min((vx + vw as i32 - x) as u32 & !1);
+        let height = (height.max(2) & !1).min((vy + vh as i32 - y) as u32 & !1);
 
         let mut grabber = Self {
             screen: HDC::default(),
@@ -108,6 +129,8 @@ impl ScreenGrabber {
             height,
             x,
             y,
+            vx,
+            vy,
         };
         grabber.open()?;
         Ok(grabber)
@@ -185,8 +208,8 @@ impl ScreenGrabber {
                 self.width as i32,
                 self.height as i32,
                 Some(self.screen),
-                self.x,
-                self.y,
+                self.x - self.vx,
+                self.y - self.vy,
                 SRCCOPY,
             )
             .map_err(|e| format!("BitBlt 失败：{e}"))
@@ -249,7 +272,7 @@ struct DxgiGrabber {
 }
 
 impl DxgiGrabber {
-    fn new(x: u32, y: u32, width: u32, height: u32) -> Result<Self, String> {
+    fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, String> {
         unsafe {
             let mut device: Option<ID3D11Device> = None;
             let mut context: Option<ID3D11DeviceContext> = None;
@@ -271,14 +294,49 @@ impl DxgiGrabber {
 
             let dxgi: IDXGIDevice = device.cast().map_err(|e| format!("转 IDXGIDevice 失败：{e}"))?;
             let adapter = dxgi.GetAdapter().map_err(|e| format!("取适配器失败：{e}"))?;
-            let output = adapter.EnumOutputs(0).map_err(|e| format!("取主输出失败：{e}"))?;
+
+            // 按选区的起点挑输出：多屏时 EnumOutputs(0) 只有主屏，录副屏会取错画面。
+            // 输出坐标是虚拟桌面物理坐标，正好和 ScreenGrabber 用同一套基准。
+            let mut chosen: Option<(IDXGIOutput, windows::Win32::Foundation::RECT)> = None;
+            let mut index = 0u32;
+            loop {
+                let output = match adapter.EnumOutputs(index) {
+                    Ok(output) => output,
+                    Err(_) => break,
+                };
+                let desc = match output.GetDesc() {
+                    Ok(desc) => desc,
+                    Err(_) => break,
+                };
+                let rect = desc.DesktopCoordinates;
+                let inside = x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+                if inside {
+                    chosen = Some((output, rect));
+                    break;
+                }
+                index += 1;
+            }
+            let (output, rect) = match chosen {
+                Some(pair) => pair,
+                None => {
+                    // 选区起点不落在任何输出里（多为屏幕间缝隙）：退回主输出，别整段录不了。
+                    let output = adapter
+                        .EnumOutputs(0)
+                        .map_err(|e| format!("取主输出失败：{e}"))?;
+                    let desc = output.GetDesc().map_err(|e| format!("读输出信息失败：{e}"))?;
+                    (output, desc.DesktopCoordinates)
+                }
+            };
             let output1: IDXGIOutput1 = output.cast().map_err(|e| format!("转 IDXGIOutput1 失败：{e}"))?;
             let dup = output1
                 .DuplicateOutput(&device)
                 .map_err(|e| format!("DuplicateOutput 失败：{e}"))?;
 
-            // 输出尺寸直接取主屏物理尺寸：DXGI 主输出就是这块。
-            let (screen_w, screen_h) = screen_size();
+            // 纹理尺寸取这块输出自己的尺寸，而不是主屏的。
+            let screen_w = (rect.right - rect.left).max(2) as u32;
+            let screen_h = (rect.bottom - rect.top).max(2) as u32;
+            let crop_x = ((x - rect.left).max(0) as u32).min(screen_w.saturating_sub(2));
+            let crop_y = ((y - rect.top).max(0) as u32).min(screen_h.saturating_sub(2));
 
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: screen_w,
@@ -304,8 +362,6 @@ impl DxgiGrabber {
                 .cast()
                 .map_err(|e| format!("转 ID3D11Resource 失败：{e}"))?;
 
-            let crop_x = x.min(screen_w.saturating_sub(2));
-            let crop_y = y.min(screen_h.saturating_sub(2));
             let crop_w = (width.max(2) & !1).min(screen_w - crop_x);
             let crop_h = (height.max(2) & !1).min(screen_h - crop_y);
 
@@ -412,16 +468,17 @@ enum Backend {
 impl FrameGrabber {
     pub fn new(x: i32, y: i32, width: u32, height: u32) -> Result<Self, String> {
         ensure_dpi_aware();
-        let (sw, sh) = screen_size();
-        let cx = x.max(0).min(sw.saturating_sub(2) as i32) as u32;
-        let cy = y.max(0).min(sh.saturating_sub(2) as i32) as u32;
-        let cw = (width.max(2) & !1).min(sw - cx);
-        let ch = (height.max(2) & !1).min(sh - cy);
+        // 选区按虚拟桌面收口：多屏时绝对坐标可能为负，不能再用主屏的 0..w/h 去夹。
+        let (vx, vy, vw, vh) = virtual_screen();
+        let cx = x.max(vx).min(vx + vw as i32 - 2);
+        let cy = y.max(vy).min(vy + vh as i32 - 2);
+        let cw = (width.max(2) & !1).min((vx + vw as i32 - cx) as u32 & !1);
+        let ch = (height.max(2) & !1).min((vy + vh as i32 - cy) as u32 & !1);
 
         // 先试 DXGI；能建起来就用它，建不起来退回 BitBlt，不给用户报错。
         let backend = match DxgiGrabber::new(cx, cy, cw, ch) {
             Ok(grabber) => Backend::Dxgi(grabber),
-            Err(_) => Backend::Gdi(ScreenGrabber::new(cx as i32, cy as i32, cw, ch)?),
+            Err(_) => Backend::Gdi(ScreenGrabber::new(cx, cy, cw, ch)?),
         };
         Ok(Self {
             backend,

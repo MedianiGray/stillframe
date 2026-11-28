@@ -57,16 +57,113 @@ struct WindowInfo {
     height: u32,
 }
 
-/// 抓主显示器整屏，返回 PNG 的 data URL。前端拿到后直接转 canvas 当冻结帧。
+/// 一块显示器：`x/y` 是它在虚拟桌面上的原点（副屏在左时为负），`width/height` 是物理像素。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DisplayInfo {
+    id: u32,
+    name: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale: f32,
+    primary: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CapturedFrame {
+    data_url: String,
+    /// 这张图来自哪块屏：前端据此把选区换算成屏幕绝对坐标。
+    display: DisplayInfo,
+}
+
+fn display_info(monitor: &xcap::Monitor) -> DisplayInfo {
+    DisplayInfo {
+        id: monitor.id().unwrap_or(0),
+        name: monitor.name().unwrap_or_default(),
+        x: monitor.x().unwrap_or(0),
+        y: monitor.y().unwrap_or(0),
+        width: monitor.width().unwrap_or(0),
+        height: monitor.height().unwrap_or(0),
+        scale: monitor.scale_factor().unwrap_or(1.0),
+        primary: monitor.is_primary().unwrap_or(false),
+    }
+}
+
+/// 列出所有显示器，多屏 DPI 换算与诊断都靠它。
 #[tauri::command]
-fn capture_screen() -> Result<String, String> {
+fn displays() -> Result<Vec<DisplayInfo>, String> {
     let monitors = xcap::Monitor::all().map_err(err)?;
-    let monitor = monitors.into_iter().next().ok_or("没有检测到显示器")?;
+    Ok(monitors.iter().map(display_info).collect())
+}
+
+#[cfg(windows)]
+fn cursor_position() -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    unsafe {
+        let mut point = POINT::default();
+        if GetCursorPos(&mut point).is_ok() {
+            (point.x, point.y)
+        } else {
+            (0, 0)
+        }
+    }
+}
+
+/// 选要抓的屏：显式 id > 鼠标所在屏 > 主屏。
+/// 和 QQ 一样默认跟着鼠标走——用户在多屏上按下快捷键，期望截的是眼前那块。
+fn pick_monitor(display: Option<u32>) -> Result<xcap::Monitor, String> {
+    let mut monitors = xcap::Monitor::all().map_err(err)?;
+    if monitors.is_empty() {
+        return Err("没有检测到显示器".to_string());
+    }
+    if let Some(id) = display {
+        if let Some(monitor) = monitors
+            .into_iter()
+            .find(|monitor| monitor.id().map(|value| value == id).unwrap_or(false))
+        {
+            return Ok(monitor);
+        }
+        return Err(format!("没有 id={id} 的显示器"));
+    }
+    #[cfg(windows)]
+    {
+        let (cx, cy) = cursor_position();
+        if let Ok(monitor) = xcap::Monitor::from_point(cx, cy) {
+            return Ok(monitor);
+        }
+    }
+    if let Some(index) = monitors
+        .iter()
+        .position(|monitor| monitor.is_primary().unwrap_or(false))
+    {
+        return Ok(monitors.remove(index));
+    }
+    Ok(monitors.remove(0))
+}
+
+/// 抓一块屏（默认鼠标所在屏），返回 PNG 的 data URL 和这块屏的几何信息。
+#[tauri::command]
+fn capture_frame(display: Option<u32>) -> Result<CapturedFrame, String> {
+    let monitor = pick_monitor(display)?;
+    let info = display_info(&monitor);
     let image = monitor.capture_image().map_err(err)?;
     let width = image.width();
     let height = image.height();
     let png_bytes = encode_png(image.into_raw(), width, height)?;
-    Ok(format!("data:image/png;base64,{}", STANDARD.encode(png_bytes)))
+    Ok(CapturedFrame {
+        data_url: format!("data:image/png;base64,{}", STANDARD.encode(png_bytes)),
+        display: info,
+    })
+}
+
+/// 抓屏只返回图像（兼容旧调用与 Android 桥的语义）。
+#[tauri::command]
+fn capture_screen(display: Option<u32>) -> Result<String, String> {
+    Ok(capture_frame(display)?.data_url)
 }
 
 /// 把贴图钉在屏幕上：独立、无边框、置顶、不进任务栏的窗口。
@@ -565,8 +662,9 @@ fn self_rect(window: tauri::WebviewWindow) -> Result<SelfRect, String> {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RecordRect {
-    x: u32,
-    y: u32,
+    /// 屏幕绝对坐标（物理像素）：多屏时可能是负值，所以不设 u32。
+    x: i32,
+    y: i32,
     width: u32,
     height: u32,
 }
@@ -842,13 +940,15 @@ fn record_loop(
 ) -> Result<recorder::RecordingStats, String> {
     let _timer = win_capture::TimerResolution::new();
     let (screen_w, screen_h) = win_capture::screen_size();
+    let (vx, vy, vw, vh) = win_capture::virtual_screen();
     let crop = match rect {
         Some(r) => (
-            r.x.min(screen_w.saturating_sub(2)) as i32,
-            r.y.min(screen_h.saturating_sub(2)) as i32,
-            r.width.min(screen_w).max(2),
-            r.height.min(screen_h).max(2),
+            r.x.max(vx).min(vx + vw as i32 - 2),
+            r.y.max(vy).min(vy + vh as i32 - 2),
+            r.width.min(vw).max(2),
+            r.height.min(vh).max(2),
         ),
+        // 没给选区就录主屏整屏：多屏下「整屏」按主屏理解更符合直觉。
         None => (0, 0, screen_w, screen_h),
     };
     let mut grabber = win_capture::FrameGrabber::new(crop.0, crop.1, crop.2, crop.3)?;
@@ -962,9 +1062,10 @@ fn record_loop(
 
     // libx264 的 yuv420p 不接受奇数宽高，选区统一收成偶数
     let crop = match rect {
+        // 非 Windows 目前只按主屏局部坐标裁：xcap 这条路暂不做多屏换算。
         Some(r) => (
-            r.x.min(screen_w.saturating_sub(2)),
-            r.y.min(screen_h.saturating_sub(2)),
+            (r.x.max(0) as u32).min(screen_w.saturating_sub(2)),
+            (r.y.max(0) as u32).min(screen_h.saturating_sub(2)),
             (r.width.max(2)) & !1,
             (r.height.max(2)) & !1,
         ),
@@ -1211,6 +1312,61 @@ pub fn run() {
         log_line(&format!("[panic] {location} :: {info}"));
     }));
 
+    // --capture-probe=<png 路径>：不开窗口，抓一张屏落盘并打印几何。
+    // 用来核对「显示器报告的尺寸 / 虚拟桌面原点 / 实际抓出来的像素」三者是否一致，
+    // 高 DPI 与多屏偏移的回归全靠这一条。
+    if let Some(path) = std::env::args().find_map(|arg| {
+        arg.strip_prefix("--capture-probe=")
+            .map(str::to_string)
+    }) {
+        match pick_monitor(None) {
+            Ok(monitor) => {
+                let info = display_info(&monitor);
+                #[cfg(windows)]
+                let virtual_desktop = win_capture::virtual_screen();
+                match monitor.capture_image() {
+                    Ok(image) => {
+                        let (width, height) = (image.width(), image.height());
+                        match encode_png(image.into_raw(), width, height) {
+                            Ok(bytes) => {
+                                let written = std::fs::write(&path, &bytes);
+                                #[cfg(windows)]
+                                let note = format!("virtual={virtual_desktop:?}");
+                                #[cfg(not(windows))]
+                                let note = "virtual=n/a".to_string();
+                                log_line(&format!(
+                                    "[capture-probe] display id={} name={} origin=({}, {}) reported={}x{} scale={:.2} image={}x{} {note} write={written:?} => {path}",
+                                    info.id, info.name, info.x, info.y, info.width, info.height, info.scale, width, height
+                                ));
+                            }
+                            Err(error) => log_line(&format!("[capture-probe] 编码失败：{error}")),
+                        }
+                    }
+                    Err(error) => log_line(&format!("[capture-probe] 抓帧失败：{error}")),
+                }
+            }
+            Err(error) => log_line(&format!("[capture-probe] 选屏失败：{error}")),
+        }
+        return;
+    }
+
+    // --displays-probe：不开窗口，把显示器几何写进日志，多屏 / 缩放排查用。
+    if std::env::args().any(|arg| arg == "--displays-probe") {
+        match displays() {
+            Ok(rows) => {
+                log_line(&format!("[display] count={}", rows.len()));
+                for row in rows {
+                    log_line(&format!(
+                        "[display] id={} name={} origin=({}, {}) size={}x{} scale={:.2} primary={}",
+                        row.id, row.name, row.x, row.y, row.width, row.height, row.scale, row.primary
+                    ));
+                }
+            }
+            Err(error) => log_line(&format!("[display] 枚举失败：{error}")),
+        }
+        return;
+    }
+
     // --autostart-probe=on|off：不开窗口，只读写一次开机自启并记日志，方便回归。
     if let Some(value) = std::env::args().find_map(|arg| {
         arg.strip_prefix("--autostart-probe=")
@@ -1236,13 +1392,14 @@ pub fn run() {
         let probe_rect = std::env::args()
             .find_map(|arg| arg.strip_prefix("--probe-rect=").map(str::to_string))
             .and_then(|value| {
-                let parts: Vec<u32> = value.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                // x/y 允许负数：副屏摆在主屏左侧时绝对坐标是负的
+                let parts: Vec<i32> = value.split(',').filter_map(|s| s.trim().parse().ok()).collect();
                 if parts.len() == 4 {
                     Some(RecordRect {
                         x: parts[0],
                         y: parts[1],
-                        width: parts[2],
-                        height: parts[3],
+                        width: parts[2].max(2) as u32,
+                        height: parts[3].max(2) as u32,
                     })
                 } else {
                     None
@@ -1324,6 +1481,8 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             capture_screen,
+            capture_frame,
+            displays,
             capture_window,
             read_tessdata,
             pin_image,

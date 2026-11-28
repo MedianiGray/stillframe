@@ -46,12 +46,21 @@ const PIXELS_PER_NOTCH = 50;
 /**
  * 自己窗口会不会挡住截取区域。
  *
+ * `offset` 是选区所在屏在虚拟桌面上的原点：窗口是屏幕绝对坐标，选区是图内坐标，
+ * 副屏（原点为负）不补偿就会误判成「没挡住」，长图里于是混进自己的窗口。
  * 重叠宽高都要超过 margin 才算遮挡：贴着边 1~2px 蹭到不算，
  * 否则每张长图都会无谓地把自己的窗口收起来，反而打断用户。
  */
-export function shadowsCapture(box: ScreenBox, region: ScreenRegion, margin = 8): boolean {
-  const overlapX = Math.min(box.x + box.width, region.x + region.w) - Math.max(box.x, region.x);
-  const overlapY = Math.min(box.y + box.height, region.y + region.h) - Math.max(box.y, region.y);
+export function shadowsCapture(
+  box: ScreenBox,
+  region: ScreenRegion,
+  margin = 8,
+  offset: { x: number; y: number } = { x: 0, y: 0 },
+): boolean {
+  const regionX = region.x + offset.x;
+  const regionY = region.y + offset.y;
+  const overlapX = Math.min(box.x + box.width, regionX + region.w) - Math.max(box.x, regionX);
+  const overlapY = Math.min(box.y + box.height, regionY + region.h) - Math.max(box.y, regionY);
   return overlapX > margin && overlapY > margin;
 }
 

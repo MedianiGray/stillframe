@@ -267,8 +267,16 @@ export function RecordPanel({ session, rect, onClose, onSaved }: RecordPanelProp
     // 那条路在桌面端录不出可交付的片子（见 docs/UPGRADE-PLAN.md 5.2）。
     if (nativeCapable) {
       try {
+        // 录制要的是屏幕绝对坐标：选区来自冻结帧（图内坐标），加上这块屏的原点。
+        // 副屏原点非 0，漏掉这一步就会录到主屏上同一位置那块区域。
+        const origin = session.origin ?? { x: 0, y: 0 };
         const path = await nativeStartRecording(
-          { x: Math.round(rect.x), y: Math.round(rect.y), width: w, height: h },
+          {
+            x: Math.round(rect.x) + origin.x,
+            y: Math.round(rect.y) + origin.y,
+            width: w,
+            height: h,
+          },
           30,
           voiceOn,
           soundOn,

@@ -122,8 +122,10 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
     let outcome: { message: string; kind: 'ok' | 'warn' } | null = null;
     try {
       // 本窗口压在选区上时，滚一屏就会把它自己拍进去、拼进长图：先收起来，结束后再露面。
+      // 自身窗口是屏幕绝对坐标，选区是图内坐标，比较前要补上这块屏的原点（多屏时不是 0）。
       const self = await nativeSelfRect();
-      if (self && shadowsCapture(self, rect)) {
+      const offset = session.origin ?? { x: 0, y: 0 };
+      if (self && shadowsCapture(self, rect, 8, offset)) {
         hidden = true;
         await nativeHideSelf();
         // 等窗口真正退场（任务栏与焦点动画）再取基准帧，否则首帧还是带着自己。
@@ -132,7 +134,8 @@ export function ScrollPanel({ seed, rect, session, onClose, onFinish }: ScrollPa
       }
 
       for (let frame = 0; frame < 30 && runningRef.current; frame += 1) {
-        await nativeScroll(rect.x + rect.w / 2, rect.y + rect.h / 2, notches);
+        // 滚轮要注到屏幕绝对坐标上：选区是图内坐标，得补上这块屏的原点。
+        await nativeScroll(rect.x + rect.w / 2 + offset.x, rect.y + rect.h / 2 + offset.y, notches);
         // 原生会话 320ms 抓一次帧，等它刷新并让目标窗口滚稳。
         await new Promise((r) => setTimeout(r, 620));
         const next = grabRegion(session.video, rect);
