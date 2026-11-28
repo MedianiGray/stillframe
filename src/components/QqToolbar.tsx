@@ -76,9 +76,11 @@ interface Props {
   busy: string | null;
   /** 编辑器里显示“屏幕录制”入口；网页端点了会重新走一次屏幕授权。 */
   allowRecord?: boolean;
+  /** 贴图已经贴满 20 张：按钮置灰并把上限写在 title 上，别等点了才被拒。 */
+  pinFull?: boolean;
 }
 
-export function QqToolbar({ state, actions, busy, allowRecord = true }: Props) {
+export function QqToolbar({ state, actions, busy, allowRecord = true, pinFull = false }: Props) {
   const [filterOpen, setFilterOpen] = useState(false);
   const active = state.tool;
 
@@ -237,7 +239,13 @@ export function QqToolbar({ state, actions, busy, allowRecord = true }: Props) {
         <button type="button" title={QQ_TEXT.ocr} className={BTN} onClick={actions.onOcr}>
           <ScanText size={16} strokeWidth={1.7} />
         </button>
-        <button type="button" title={QQ_TEXT.nail} className={BTN} onClick={actions.onPin}>
+        <button
+          type="button"
+          title={pinFull ? QQ_TEXT.nailLimit : QQ_TEXT.nail}
+          className={BTN}
+          disabled={pinFull}
+          onClick={actions.onPin}
+        >
           <Pin size={16} strokeWidth={1.7} />
         </button>
         {allowRecord ? (

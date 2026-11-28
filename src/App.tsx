@@ -160,6 +160,7 @@ export default function App() {
                 });
               }}
               onLibraryChanged={bumpLibrary}
+              pinCount={pins.length}
             />
           ) : null}
 

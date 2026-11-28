@@ -22,6 +22,8 @@ interface EditorProps {
   onOcr?: (image: HTMLCanvasElement) => void;
   onTranslate?: (image: HTMLCanvasElement) => void;
   onRecord?: () => void;
+  /** 贴图已满 20 张，工具栏的「钉在桌面上」置灰。 */
+  pinFull?: boolean;
 }
 
 interface TextDraft {
@@ -37,7 +39,7 @@ const nextId = () => {
   return `a${seq}`;
 };
 
-export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr, onTranslate, onRecord }: EditorProps) {
+export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr, onTranslate, onRecord, pinFull = false }: EditorProps) {
   const toast = useToast();
   const [tool, setTool] = useState<AnnotationKind>('rect');
   const [color, setColor] = useState('#FB3838');
@@ -388,6 +390,7 @@ export function Editor({ image, settings, onClose, onSaved, onPin, onLong, onOcr
             }}
             busy={busy}
             allowRecord={Boolean(onRecord)}
+            pinFull={pinFull}
           />
         </div>
       </div>

@@ -306,14 +306,24 @@ fn read_tessdata(app: AppHandle, lang: String) -> Result<String, String> {
 /// 截图前把自己藏起来，避免把 Stillframe 自己拍进画面。
 #[tauri::command]
 fn hide_self(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.hide().map_err(err)
+    window.hide().map_err(|error| format!("隐藏窗口失败：{error}"))
 }
 
 /// 拍完再露出来。
+///
+/// show 与「还原 + 聚焦」分开算：show 成功就算成功，聚焦失败只影响手感，
+/// 不能让前端以为窗口还藏着又去重试（那会让窗口闪一下）。
 #[tauri::command]
 fn show_self(window: tauri::WebviewWindow) -> Result<(), String> {
-    window.show().map_err(err)?;
-    window.set_focus().map_err(err)
+    window.show().map_err(|error| format!("恢复窗口失败：{error}"))?;
+    // 隐藏前若已被最小化，show 出来依旧是收起的，顺手还原
+    if let Err(error) = window.unminimize() {
+        log_line(&format!("show_self: 还原窗口失败 {error}"));
+    }
+    if let Err(error) = window.set_focus() {
+        log_line(&format!("show_self: 聚焦失败 {error}"));
+    }
+    Ok(())
 }
 
 /// 一档滚轮的 delta 值（Windows 的 WHEEL_DELTA）。
