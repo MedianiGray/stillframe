@@ -37,15 +37,16 @@
 
 | | 网页端 | 桌面壳 | Android 壳 |
 | --- | --- | --- | --- |
-| 容器 | WebM (VP9/Opus) | WebM（可加 FFmpeg 转 MP4） | WebM（Android WebView 的 MediaRecorder） |
-| 帧率 | 30fps（由 `captureStream(fps)` 决定） | **3–5fps**（原生抓帧 + PNG 回传，`openNativeSession` 默认 320ms 一帧） | **约 3fps**，同上 |
-| 区域裁切 | ✅ canvas | ✅ | ✅ |
-| 系统声 | ⚠️ 取决于系统与浏览器（多数只给标签页/窗口声） | ❌ 原生抓帧链路不带音频（要系统声需 WASAPI 采集，未实现） | ❌ 同上（`AudioPlaybackCapture` 可做，未接） |
-| 麦克风 | ✅ | ❌（同上） | ❌（同上） |
+| 容器 | WebM (VP9/Opus) | **MP4（H.264）**，Rust 抓帧线程原始帧直喂 FFmpeg（`h264_qsv` 可用则硬件编码，否则 libx264 CRF 20） | WebM（Android WebView 的 MediaRecorder） |
+| 帧率 | 30fps（由 `captureStream(fps)` 决定） | **30fps 目标**，实测 1080p 区域 20–30fps（DXGI 约 6–9ms/帧；退回 BitBlt 时远程/低配会话 20–25fps）。点「开始录制」后要等首帧就绪（界面显示「准备中…」，实测 3–13 秒），`REC` 亮起才是真的在录 | **约 3fps**（原生抓帧 + PNG 回传，`openNativeSession` 默认 320ms 一帧） |
+| 区域裁切 | ✅ canvas | ✅ 抓帧侧按选区裁 | ✅ |
+| 系统声 | ⚠️ 取决于系统与浏览器（多数只给标签页/窗口声） | ✅ WASAPI 环回（与麦克风可同时，停下再封装进 MP4） | ❌（`AudioPlaybackCapture` 可做，未接） |
+| 麦克风 | ✅ | ✅ 录屏条上开关，默认关；设备被占用或无权限时静默退回纯画面 | ❌ |
 | 暂停/继续 | ✅ | ✅ | ✅ |
 | 前台通知 | — | — | ✅ 系统强制 |
+| 录屏条标注进成片 | ✅ 画在 canvas 流里 | ✅ 逐帧用 GDI 烧进画面（撤销只影响后面的帧） | ❌ |
 
-**为什么桌面/Android 只有 3–5fps**：这两种壳的帧来自系统截屏 API，每帧要编码成 PNG、再转 base64 穿过一次 JS 边界。要做到 30fps 必须把编码器下沉到原生（Windows 用 Desktop Duplication API + Media Foundation，Android 用 `MediaCodec` 直连 `VirtualDisplay`），这是 v0.2 的计划，不在当前版本里假装支持。
+**桌面壳为什么能做到 30fps、Android 还停在 3fps**：桌面壳已把编码器下沉到原生（Desktop Duplication / BitBlt 抓帧 → FFmpeg 直出），帧不进 JS 边界；Android 仍是「系统截屏 → PNG → base64 → JS」的老链路，要提速得走 `MediaCodec` 直连 `VirtualDisplay`，尚未接。
 
 ## 5. OCR 与翻译
 

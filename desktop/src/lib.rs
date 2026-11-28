@@ -451,12 +451,29 @@ fn list_windows() -> Result<Vec<WindowInfo>, String> {
         if title.trim().is_empty() {
             continue;
         }
+        let id = window.id().unwrap_or(0);
+        let width = window.width().unwrap_or(0);
+        let height = window.height().unwrap_or(0);
+        // 隐藏窗口截出来是一张空图（QQ 的 ToolBarHiddenWindow、各种消息窗都是这种），
+        // 不该出现在下拉里；尺寸过小的辅助窗同样跳过，最小化窗口保留（点它会提示还原）。
+        if id == 0 || width < 16 || height < 16 {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+            let hwnd = HWND(id as usize as *mut core::ffi::c_void);
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+                continue;
+            }
+        }
         rows.push(WindowInfo {
-            id: window.id().unwrap_or(0),
+            id,
             title,
             app: window.app_name().unwrap_or_default(),
-            width: window.width().unwrap_or(0),
-            height: window.height().unwrap_or(0),
+            width,
+            height,
         });
     }
     Ok(rows)
