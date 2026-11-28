@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, X } from 'lucide-react';
+import { AlertTriangle, Keyboard, X } from 'lucide-react';
 import { Rail } from './components/Rail';
 import { TopBar } from './components/TopBar';
 import { CaptureWorkspace } from './components/CaptureWorkspace';
@@ -7,7 +7,7 @@ import { LibraryView } from './components/LibraryView';
 import { SettingsView } from './components/SettingsView';
 import { PinLayer, type PinItem } from './components/PinLayer';
 import { loadSettings, saveSettings } from './lib/settings';
-import { hostKind, nativeOpenQuick, nativePin, onHostEvent } from './lib/desktop';
+import { hostKind, nativeHotkeyStatus, nativeOpenQuick, nativePin, onHostEvent } from './lib/desktop';
 import { QQ_TEXT } from './lib/qqspec';
 import { useToast } from './components/Toasts';
 import type { Settings } from './lib/settings';
@@ -48,6 +48,8 @@ export default function App() {
   const [autoStart, setAutoStart] = useState<{ mode: ToolMode; tick: number }>({ mode: 'snap', tick: 0 });
   // 全局热键被别的截图工具先注册时，桌面壳会上报：静默失效比报错更糟。
   const [hotkeyIssues, setHotkeyIssues] = useState<HotkeyIssue[]>([]);
+  // 主键被占、壳自己改走备用键（Ctrl+Shift+X）时，把「现在按哪个」说清楚。
+  const [hotkeyRemaps, setHotkeyRemaps] = useState<HotkeyIssue[]>([]);
 
   const bumpLibrary = () => setLibraryKey((n) => n + 1);
 
@@ -73,10 +75,21 @@ export default function App() {
       );
     };
 
+    const onRemap = (payload: string) => {
+      const [mode, keys] = payload.split('|');
+      if (!mode || !keys) return;
+      setHotkeyRemaps((prev) =>
+        prev.some((item) => item.mode === mode && item.keys === keys)
+          ? prev
+          : [...prev, { mode, keys }],
+      );
+    };
+
     void Promise.all([
       onHostEvent('stillframe://shortcut', handle),
       onHostEvent('stillframe://quick', handle),
       onHostEvent('stillframe://shortcut-failed', onConflict),
+      onHostEvent('stillframe://shortcut-remap', onRemap),
     ]).then((results) => {
       results.forEach((off) => {
         if (!off) return;
@@ -89,6 +102,24 @@ export default function App() {
       disposed = true;
       offs.forEach((off) => off());
     };
+  }, []);
+
+  // 热键注册发生在 setup 里，通常早于这里的订阅；主动拉一次当前状态，
+  // 否则「主键被占、已换备用键」这条关键信息永远到不了界面。
+  useEffect(() => {
+    void nativeHotkeyStatus().then((rows) => {
+      if (!rows.length) return;
+      setHotkeyRemaps(
+        rows
+          .filter((row) => row.state === 'fallback')
+          .map((row) => ({ mode: row.mode, keys: row.keys })),
+      );
+      setHotkeyIssues(
+        rows
+          .filter((row) => row.state === 'unavailable')
+          .map((row) => ({ mode: row.mode, keys: row.keys })),
+      );
+    });
   }, []);
 
   const header =
@@ -112,15 +143,36 @@ export default function App() {
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar mode={mode} title={header.title} subtitle={header.subtitle} />
 
+        {hotkeyRemaps.length > 0 ? (
+          <div className="flex items-center gap-2 border-b border-sky-400/20 bg-sky-400/[0.07] px-4 py-1.5 text-[11px] leading-none text-sky-200/85">
+            <Keyboard className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">
+              主键被其他程序占着，已自动改用备用键位：
+              {hotkeyRemaps
+                .map((item) => `${MODE_LABEL[item.mode] ?? item.mode} ${item.keys}`)
+                .join('、')}
+              ，按这组就能直接开拍
+            </span>
+            <button
+              type="button"
+              onClick={() => setHotkeyRemaps([])}
+              className="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] text-sky-200/60 transition-colors hover:bg-white/10 hover:text-sky-100"
+              title="知道了"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        ) : null}
+
         {hotkeyIssues.length > 0 ? (
           <div className="flex items-center gap-2 border-b border-amber-400/20 bg-amber-400/[0.07] px-4 py-1.5 text-[11px] leading-none text-amber-200/85">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             <span className="truncate">
-              以下快捷键已被其他程序占用：
+              这些快捷键连备用键位都被占用了：
               {hotkeyIssues
                 .map((item) => `${MODE_LABEL[item.mode] ?? item.mode} ${item.keys}`)
                 .join('、')}
-              。可从左侧模式卡或快捷浮窗进入
+              。从左侧模式卡或快捷浮窗进入
             </span>
             <button
               type="button"

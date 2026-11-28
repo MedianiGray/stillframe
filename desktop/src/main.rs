@@ -36,6 +36,7 @@ fn main() {
             || arg.starts_with("--autostart-probe")
             || arg.starts_with("--displays-probe")
             || arg.starts_with("--capture-probe")
+            || arg.starts_with("--overlay-probe")
     });
     #[cfg(windows)]
     if !probe && already_running() {

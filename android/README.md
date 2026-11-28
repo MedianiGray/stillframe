@@ -11,8 +11,8 @@
 npm install
 npm run build
 
-# 2) 把产物放进 WebView 的 assets（PowerShell）
-Copy-Item -Recurse -Force dist\* android\app\src\main\assets\www\
+# 2) 把产物整包同步进 WebView 的 assets（会先清空旧副本再拷，含 OCR 语言包）
+powershell -NoProfile -File tools\sync-android-assets.ps1
 
 # 3) 编译
 cd android

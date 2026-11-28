@@ -456,6 +456,9 @@ impl DxgiGrabber {
 /// 抓帧门面：优先 DXGI，不可用则回退 BitBlt。两条路径对外都是「选区 BGRA」。
 pub struct FrameGrabber {
     backend: Backend,
+    /// DXGI 建起来时也先备一台 BitBlt：锁屏、远程会话断开、显卡被独占时
+    /// DXGI 常常一张帧都吐不出来，这时候整段录制不该跟着报废。
+    gdi_fallback: Option<ScreenGrabber>,
     width: u32,
     height: u32,
 }
@@ -476,12 +479,13 @@ impl FrameGrabber {
         let ch = (height.max(2) & !1).min((vy + vh as i32 - cy) as u32 & !1);
 
         // 先试 DXGI；能建起来就用它，建不起来退回 BitBlt，不给用户报错。
-        let backend = match DxgiGrabber::new(cx, cy, cw, ch) {
-            Ok(grabber) => Backend::Dxgi(grabber),
-            Err(_) => Backend::Gdi(ScreenGrabber::new(cx, cy, cw, ch)?),
+        let (backend, gdi_fallback) = match DxgiGrabber::new(cx, cy, cw, ch) {
+            Ok(grabber) => (Backend::Dxgi(grabber), ScreenGrabber::new(cx, cy, cw, ch).ok()),
+            Err(_) => (Backend::Gdi(ScreenGrabber::new(cx, cy, cw, ch)?), None),
         };
         Ok(Self {
             backend,
+            gdi_fallback,
             width: cw,
             height: ch,
         })
@@ -496,6 +500,19 @@ impl FrameGrabber {
     }
 
     pub fn grab(&mut self) -> Result<&[u8], String> {
+        // DXGI 首帧等不到时立刻降到 BitBlt 并锁死在这个后端，不再每帧白等一次超时。
+        let dxgi_starving = match &mut self.backend {
+            Backend::Dxgi(grabber) => match grabber.grab() {
+                Ok(_) => false,
+                Err(error) => error.contains("还没拿到第一帧"),
+            },
+            Backend::Gdi(_) => false,
+        };
+        if dxgi_starving {
+            if let Some(fallback) = self.gdi_fallback.take() {
+                self.backend = Backend::Gdi(fallback);
+            }
+        }
         match &mut self.backend {
             Backend::Dxgi(grabber) => grabber.grab(),
             Backend::Gdi(grabber) => grabber.grab(),
@@ -509,4 +526,56 @@ impl FrameGrabber {
     pub fn height(&self) -> u32 {
         self.height
     }
+}
+
+/// 录制前先确认这一屏真的能取到画面。
+///
+/// 锁屏、远程会话被断开、显示器休眠这三种状态下，BitBlt 会老老实实返回一整屏同色
+/// （通常是深蓝），录下来就是一段没人想看的纯色视频。
+///
+/// 判断只按**整个虚拟桌面**做，不看用户框的那块：框选正好落在纯色壁纸上、或者窗口
+/// 刚退出全屏还没重绘，都不是「屏幕没内容」——按选区判会把正常录制误杀。
+pub fn probe_recording_frame() -> Result<(), String> {
+    let (vx, vy, vw, vh) = virtual_screen();
+    let mut grabber = FrameGrabber::new(vx, vy, vw, vh)?;
+    // 首帧可能要多等几下：DXGI 刚建好时第一帧本来就慢，屏幕刚切过全屏也要等合成器。
+    let mut last = String::new();
+    let mut data: Option<Vec<u8>> = None;
+    for _ in 0..12 {
+        match grabber.grab() {
+            Ok(frame) => {
+                data = Some(frame.to_vec());
+                break;
+            }
+            Err(error) => {
+                last = error;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    let Some(data) = data else {
+        return Err(format!(
+            "当前桌面取不到画面（{last}）。锁屏、远程会话断开或显示器休眠时会这样，先解锁屏幕再录"
+        ));
+    };
+    let w = grabber.width() as usize;
+    let h = grabber.height() as usize;
+    let stride = w * 4;
+    let step_x = (w / 48).max(1) * 4;
+    let step_y = (h / 48).max(1);
+    let first = (data[0], data[1], data[2]);
+    let mut uniform = true;
+    'rows: for row in (0..h).step_by(step_y) {
+        for col in (0..stride).step_by(step_x) {
+            let base = row * stride + col;
+            if (data[base], data[base + 1], data[base + 2]) != first {
+                uniform = false;
+                break 'rows;
+            }
+        }
+    }
+    if uniform {
+        return Err("整屏是一块纯色（多半是锁屏、远程会话断开或显示器休眠），先解锁屏幕再录".to_string());
+    }
+    Ok(())
 }

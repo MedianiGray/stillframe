@@ -110,8 +110,8 @@ cargo tauri build             # 打包安装包
 
 ```bash
 npm run build
-# 把前端产物放进 WebView 的 assets
-Copy-Item -Recurse -Force dist/* android/app/src/main/assets/www/
+# 把前端产物整包同步进 WebView 的 assets（先清空旧副本，含 tessdata / tesseract）
+powershell -NoProfile -File tools/sync-android-assets.ps1
 cd android
 gradlew assembleDebug
 ```
@@ -129,6 +129,36 @@ Android 壳用 `WebView` 加载 `assets/www/index.html` 并注入 `AndroidBridge
 为什么不做「全页长截图」：插件只能 `captureVisibleTab` 截可视区，滚动拼接碰上吸顶导航和懒加载会错位，成功率不如桌面端的自动滚动，这条留在桌面壳里做。细节见 `extension/README.md`。
 
 > **构建状态说明**：网页端 `tsc --noEmit` 零错误、`npm run build` 通过；`desktop/` 已在 Windows 上用 Rust 1.100 + MSVC 编译并真机验收（截图、窗口截图、取字、延时、快捷浮窗、1080p 60 秒录屏、带麦克风录制、系统声、录屏标注进成片）；自动滚动代码完成但 20 屏样本未跑够；录制管线编码侧在 Linux 真跑（90 帧合成画面 → h264 MP4，时长 3.000s、帧数 90 与输入吻合），Windows 真机 1080p×60 秒三轮 27.9–29.0fps、丢帧均 <1%、成片时长为整秒；带麦克风 1080p×30 秒成片 29.933 秒、音画差 66ms；系统声（WASAPI 环回）720p×20 秒成片音轨 19.816 秒、`mean_volume -5.0 dB`，麦克风+系统声两路同时 15 秒成片 15.000 秒、单条 AAC；录屏标注 1280×720×12 秒 5 条标注逐条按时出现、丢帧 0、每帧额外开销约 1.5ms；`android/` 仍是未做编译验证的源码工程（本机无 JDK / Android SDK），首次构建若遇版本号或 API 变更，按报错调整依赖版本即可。
+
+## 验收与自检
+
+改完想让「它到底还能不能用」有个明确答案，跑这三层：
+
+```bash
+# 1) 前端：类型、单测、构建
+npx tsc --noEmit
+npx vitest run tests        # 8 个文件 64 条
+npm run build
+
+# 2) 网页端端到端（要能起 24118 的静态服务，脚本会复用）
+npx playwright test --workers=1 --reporter=list    # 6 条：标注保存→图库 / 取字 / 贴图 / 粘贴 / 模式切换 / 设置
+
+# 3) 桌面壳：带调试端口启动后接管真机窗口
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9223'
+Start-Process I:\Cache\cargo-target\debug\stillframe-desktop.exe
+node tools\shell-selfcheck.mjs                     # 命令级：抓屏/落盘/窗口/自启/滚动
+node tools\shell-selfcheck.mjs --windows=pin       # 建窗类一次只验一项
+node tools\shell-selfcheck.mjs --windows=quick
+node tools\shell-probe.mjs --flow=snap             # 交互级：全屏→抓帧→拖框→双击→标注台
+```
+
+几个真会踩到的点，写在这里省下一次排查：
+
+- **白屏**：`cargo build` 不走 tauri CLI 时必须带 `--features custom-protocol`，否则 `devUrl` 还指着 `127.0.0.1:24118`，没有 dev server 就是一块白板。改了前端要先 `npm run build`。
+- **建窗类命令要 async**：`WebviewWindowBuilder::build()` 在主线程会自锁（浮窗永远不出来）。`open_quick` 是 async，热键/托盘路径用 `tauri::async_runtime::spawn`。
+- **主窗被完全遮挡后 invoke 会超时**：WebView2 会把被遮挡窗口的 JS 挂起。建窗类自检因此拆成 `--windows=quick|pin`，一次一项。
+- **`save_png` 会弹系统另存对话框**，自动化里不要调；落盘能力看 `write_shot`（同一条写文件代码）。
+- **屏幕没内容时录屏会被拒**：锁屏 / 远程会话断开 / 显示器休眠时整屏是纯色，`start_recording` 会直接回可读原因；`--capture-probe=<png>` 可以先看一眼抓到的到底是什么。
 
 ## 与 QQ 截图模块的对照
 
@@ -248,18 +278,19 @@ OCR 用 tesseract.js 的单例 worker，换语言时 terminate 重建，避免 w
 
 ## 快捷键
 
-| 动作 | 桌面端 | 网页端 |
-| --- | --- | --- |
-| 区域截图 | `Ctrl+Alt+S` | 点按钮（无全局热键） |
-| 区域录屏 | `Ctrl+Alt+R` | 同上 |
-| 滚动长截图 | `Ctrl+Alt+C` | 同上 |
-| 提取文字 | `Ctrl+Alt+O` | 同上 |
-| 屏幕翻译 | `Ctrl+Alt+F` | 同上 |
-| 撤销 / 重做 | `Ctrl+Z` / `Ctrl+Shift+Z` | 同 |
-| 复制到剪贴板 | `Ctrl+C` | 同 |
-| 另存为 | `Ctrl+S` | 同 |
+| 动作 | 桌面端主键 | 主键被占时自动换 | 网页端 |
+| --- | --- | --- | --- |
+| 区域截图 | `Ctrl+Alt+S` | `Ctrl+Shift+S` | 点按钮（无全局热键） |
+| 区域录屏 | `Ctrl+Alt+R` | `Ctrl+Shift+R` | 同上 |
+| 滚动长截图 | `Ctrl+Alt+C` | `Ctrl+Shift+C` | 同上 |
+| 提取文字 | `Ctrl+Alt+O` | `Ctrl+Shift+O` | 同上 |
+| 屏幕翻译 | `Ctrl+Alt+F` | `Ctrl+Shift+F` | 同上 |
+| 快捷浮窗 | `Ctrl+Alt+Q` | — | 无 |
+| 撤销 / 重做 | `Ctrl+Z` / `Ctrl+Shift+Z` | — | 同 |
+| 复制到剪贴板 | `Ctrl+C` | — | 同 |
+| 另存为 | `Ctrl+S` | — | 同 |
 
-桌面端热键在 `desktop/src/lib.rs` 的 `register_shortcuts` 里注册，可在设置面板改键位（改完需重启壳）。
+桌面端热键在 `desktop/src/lib.rs` 的 `shortcuts()` 里定义，每组模式给主键与备用键两档：主键（`Ctrl+Alt+*`，和 QQ 截图一致）被 QQ 客户端等占用时，壳会自动注册同一字母的 `Ctrl+Shift+*`，并在界面顶部说明「现在按哪组」。两档都抢不到才会提示走模式卡/快捷浮窗。注册结果也能通过 `hotkey_status` 命令查（设置页与顶部提示共用这一份数据）。
 
 ## 隐私与数据
 

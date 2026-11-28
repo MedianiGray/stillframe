@@ -7,7 +7,9 @@ import {
   isDesktop,
   nativeAppInfo,
   nativeAutostartEnabled,
+  nativeDisplays,
   nativeSetAutostart,
+  type HostDisplay,
   type HostInfo,
 } from '../lib/desktop';
 import { useToast } from './Toasts';
@@ -31,11 +33,13 @@ export function SettingsView({ settings, onSave }: SettingsViewProps) {
   const desktopShell = hostKind() === 'tauri';
   const [host, setHost] = useState<HostInfo | null>(null);
   const [autostart, setAutostart] = useState(false);
+  const [screens, setScreens] = useState<HostDisplay[]>([]);
 
   useEffect(() => {
     if (!desktopShell) return;
     void nativeAppInfo().then(setHost);
     void nativeAutostartEnabled().then(setAutostart);
+    void nativeDisplays().then(setScreens);
   }, [desktopShell]);
 
   const toggleAutostart = async (next: boolean) => {
@@ -269,6 +273,25 @@ export function SettingsView({ settings, onSave }: SettingsViewProps) {
               关掉窗口只会收进系统托盘，抓屏与热键仍然可用；要真正退出请右键托盘图标选「退出 定格」。
               托盘图标建不起来时（例如某些远程会话），关窗就是退出。
             </p>
+            <div className="mt-3 border-t border-white/10 pt-3">
+              <span className="label">显示器</span>
+              {screens.length === 0 ? (
+                <p className="mt-1 text-[11px] text-muted">没有读到显示器信息</p>
+              ) : (
+                <ul className="mt-1 space-y-0.5 font-mono text-[10.5px] text-muted">
+                  {screens.map((screen) => (
+                    <li key={screen.id}>
+                      #{screen.id} {screen.name || '显示器'} · {screen.width}×{screen.height}
+                      {screen.scale !== 1 ? ` @${Math.round(screen.scale * 100)}%` : ''}
+                      {screen.primary ? ' · 主屏' : ''} · 原点 ({screen.x}, {screen.y})
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="mt-1 text-[11px] leading-5 text-muted">
+                截图 / 录屏默认跟着鼠标走：在哪块屏按下就用哪块屏，框选时主窗会铺满那块屏。
+              </p>
+            </div>
           </section>
         ) : null}
 

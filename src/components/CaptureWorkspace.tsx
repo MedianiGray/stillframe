@@ -4,7 +4,18 @@ import type { Rect, ToolMode } from '../lib/types';
 import type { Settings } from '../lib/settings';
 import { canvasFromFile, cropCanvas } from '../lib/image';
 import { grabFrame, openNativeSession, openScreenSession, type ScreenSession } from '../lib/capture';
-import { hostKind, isDesktop, nativeCaptureScreen, nativeCaptureWindow, nativeHideSelf, nativeListWindows, nativeShowSelf, type NativeWindow } from '../lib/desktop';
+import {
+  hostKind,
+  isDesktop,
+  nativeCaptureScreen,
+  nativeCaptureWindow,
+  nativeEnterOverlay,
+  nativeExitOverlay,
+  nativeHideSelf,
+  nativeListWindows,
+  nativeShowSelf,
+  type NativeWindow,
+} from '../lib/desktop';
 import { useToast } from './Toasts';
 import { SelectionOverlay } from './SelectionOverlay';
 import { Editor } from './Editor';
@@ -101,6 +112,8 @@ export function CaptureWorkspace({
   const [windowId, setWindowId] = useState<number | null>(null);
   const [windowsBusy, setWindowsBusy] = useState(false);
   const sessionRef = useRef<ScreenSession | null>(null);
+  /** 覆盖层铺在哪块屏：抓帧与录制都钉在这块，鼠标中途挪走也不换屏。 */
+  const overlayDisplayRef = useRef<number | undefined>(undefined);
   const stateRef = useRef(state);
   stateRef.current = state;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -139,7 +152,7 @@ export function CaptureWorkspace({
    * 单帧类捕捉：延时倒计时结束后先收起自身窗口，抓完再亮出来，避免把自己拍进画面。
    * hide 失败照抓（画面里可能带着本窗口），但收尾一律走 show——藏起来没亮回来才是真事故。
    */
-  const grabWithoutSelf = async () => {
+  const grabWithoutSelf = async (display?: number) => {
     if (hostKind() !== 'tauri') return nativeCaptureScreen();
     try {
       await nativeHideSelf();
@@ -152,7 +165,7 @@ export function CaptureWorkspace({
       void nativeShowSelf().catch(() => undefined);
     }, 5000);
     try {
-      return await nativeCaptureScreen();
+      return await nativeCaptureScreen(display);
     } finally {
       window.clearTimeout(watchdog);
       await showSelfStrict();
@@ -236,6 +249,37 @@ export function CaptureWorkspace({
     return () => window.removeEventListener('paste', onPaste);
   }, [openLocalImage]);
 
+  /**
+   * 进截图覆盖层：把主窗铺到鼠标所在那块屏再抓帧。
+   * 顺序不能反——先全屏再移动，全屏的是主屏；先抓帧再全屏，画面与选框会差一截。
+   * 铺屏失败不影响截图（退回「窗口内框选整屏」的老样子），只是视野小一点。
+   */
+  const enterOverlay = useCallback(async (): Promise<number | undefined> => {
+    if (!isDesktop()) return undefined;
+    try {
+      const display = await nativeEnterOverlay();
+      if (!display) return undefined;
+      overlayDisplayRef.current = display.id;
+      // 等窗口真正铺开：全屏切换是异步的，WebView 视口尺寸要下一两帧才更新，
+      // 视口没更新就抓帧，选区换算会按旧窗口尺寸算，框出来的位置就偏了。
+      await new Promise((resolve) => window.requestAnimationFrame(() => resolve(null)));
+      await new Promise((resolve) => setTimeout(resolve, 260));
+      return display.id;
+    } catch (error) {
+      toast(
+        error instanceof Error ? `没能铺满屏幕，改为窗口内框选：${error.message}` : '没能铺满屏幕，改为窗口内框选',
+        'warn',
+      );
+      return undefined;
+    }
+  }, [toast]);
+
+  const exitOverlay = useCallback(() => {
+    overlayDisplayRef.current = undefined;
+    if (!isDesktop()) return;
+    void nativeExitOverlay().catch(() => undefined);
+  }, []);
+
   const start = async (target: ToolMode) => {
     setLoading(true);
     const singleFrame = target === 'snap' || target === 'ocr' || target === 'translate';
@@ -251,15 +295,16 @@ export function CaptureWorkspace({
           if (cancelCountdownRef.current) return;
           setCountdown(null);
         }
+        const display = await enterOverlay();
         if (target === 'scroll' || target === 'record') {
           // 长图与录屏要连续取帧，原生宿主开一个轮询帧源。
-          const source = await openNativeSession();
+          const source = await openNativeSession({ display });
           sessionRef.current = source;
           const frame = grabFrame(source.video);
           setState({ kind: 'selecting', mode: target, frame, session: source });
         } else {
           // 单帧类（截图 / OCR / 翻译）抓一张就够，不轮询。
-          const frame = await grabWithoutSelf();
+          const frame = await grabWithoutSelf(display);
           if (!frame) throw new Error('原生抓帧没有返回画面');
           setState({ kind: 'selecting', mode: target, frame, session: null });
         }
@@ -271,6 +316,7 @@ export function CaptureWorkspace({
       setState({ kind: 'selecting', mode: target, frame, session });
     } catch (error) {
       stopSession();
+      exitOverlay();
       const message = error instanceof Error ? error.message : '无法开始捕捉';
       toast(message.includes('Permission') || message.includes('denied') ? '你取消了屏幕授权' : message, 'warn');
     } finally {
@@ -294,6 +340,9 @@ export function CaptureWorkspace({
 
   const confirmRegion = (rect: Rect) => {
     if (state.kind !== 'selecting') return;
+    // 选区落定就退出全屏：接下来的标注台 / 长图 / 录屏面板都要在普通窗口里看，
+    // 而且长图与录屏的「自身遮挡判断」也依赖窗口回到正常大小。
+    exitOverlay();
     const { mode: target, frame, session } = state;
     const image = cropCanvas(frame, rect);
 
@@ -325,6 +374,7 @@ export function CaptureWorkspace({
   };
 
   const finish = () => {
+    exitOverlay();
     stopSession();
     setState({ kind: 'idle' });
   };
@@ -404,6 +454,7 @@ export function CaptureWorkspace({
                   : '拖动框选区域 · 双击快速完成 · 右键退出'
         }
         onCancel={() => {
+          exitOverlay();
           stopSession();
           setState({ kind: 'idle' });
         }}
@@ -573,7 +624,7 @@ export function CaptureWorkspace({
             </span>
           </div>
           <p className="mt-2 font-mono text-[10px] tracking-wider text-muted/70">
-            {host === 'tauri' ? 'Ctrl+Alt+Q 呼出快捷浮窗 · Ctrl+Alt+S / C / R / O / F 直接进入对应模式' : ''}
+            {host === 'tauri' ? 'Ctrl+Alt+Q 呼出快捷浮窗 · 主键 Ctrl+Alt+S / C / R / O / F（被占用时自动换 Ctrl+Shift+同字母）直接进入对应模式' : ''}
           </p>
 
           {host === 'tauri' && singleFrameMode ? (

@@ -1,5 +1,94 @@
 # 变更记录
 
+## v0.4 第十四批：全模块自检，修掉两处「看起来正常其实不通」的地方（2026-11-28）
+
+### 修：录屏在远程会话 / 锁屏前态下直接报废
+
+- 现象：点「开始录制」→ 界面进入 `REC · 00:06` → 点「结束录制」→ 提示「停止录制失败」，成片是 262 B 的空 MP4。
+- 根因：`DxgiGrabber` 一张帧都吐不出来（`DXGI 还没拿到第一帧`），录制线程第一帧就在 `grab()?` 上返回 Err。远程会话 / 锁屏 / 显示器休眠时 `AcquireNextFrame` 常驻超时，这不是代码顺序问题。
+- 修法：`FrameGrabber` 在 DXGI 建成功时**同时**备一台 BitBlt（`gdi_fallback`）。`grab()` 一旦读到「还没拿到第一帧」，立刻 `take()` 后备换成 `Backend::Gdi` 并锁死在这个后端，不再每帧白等一次超时。
+- 真机验证：`--record-probe` 出片 `1920×1080 / 30fps / 90 帧 / 3.000s`，日志 `backend=gdi`，抽帧确认画面是真实桌面（QQ 通知都在）。
+
+### 新增：录制前先确认「这一屏有内容」
+
+- `win_capture::probe_recording_frame()`：整屏抓一帧（最多 12 次、每次 100ms，等屏幕切过全屏后合成器重绘），按 48×48 网格采样，全部同色就拒绝录制，回「整屏是一块纯色（多半是锁屏、远程会话断开或显示器休眠），先解锁屏幕再录」。
+- `start_recording` 先跑这一步：与其让用户录完 10 秒才发现是一段纯色，不如点下去就讲清楚。
+- 只按**整屏**判断、不看框选区域：框选正好落在纯色壁纸、或窗口刚退出全屏还没重绘，都是正常录制，按选区判会把它们误杀（第一版就是这么误杀的，真机复现后改掉）。
+
+### 修：快捷浮窗在主线程同步建窗会自锁
+
+- `open_quick()` 原来是同步命令，`WebviewWindowBuilder::build()` 在主线程等 WebView2 初始化 → 自锁，浮窗永远出不来，界面上表现为点了没反应、8 秒后前端超时。
+- 现在 `open_quick` 是 `async fn`；`toggle_quick()`（热键 Ctrl+Alt+Q、托盘「快捷浮窗」）与 setup 里的 `--quick` 启动都改成 `tauri::async_runtime::spawn` 后台建窗。
+- 真机验证：`invoke('open_quick')` 返回 ok（首建约 9 秒，低内存 + 远端会话下 WebView2 建窗慢），`/json` 里 1 秒内出现 `quick.html` target，`quick_action('snap')` 返回 ok。
+
+### 新增：`tools/shell-selfcheck.mjs`——不点界面，把命令一条条过一遍
+
+- 覆盖 `app_info`、`hotkey_status`、`displays`、`autostart_enabled`（含 `set_autostart(true/false)` 往返）、`capture_screen`、`capture_frame`、`capture_window`、`list_windows`、`write_shot`、`scroll_at`。
+- 建窗类（`open_quick` / `pin_image`）单独跑：这类窗口顶到最前遮住主窗后，WebView2 会挂起主窗 JS，后续 invoke 全部超时——不是命令坏了，是一次只能验一项，所以拆成 `--windows=quick` / `--windows=pin`。
+- `save_png` 自动跳过：它会弹系统「另存为」对话框占住主线程，落盘能力由 `write_shot` 证明（同一条写文件路径）。
+- 本轮实测：core 9 项 + pin 全通过；`write_shot` 落盘 `C:\Users\35342\Pictures\Stillframe\selfcheck.png`；`scroll_at` 26ms 返回 Ok。
+
+### 新增：`tools/sync-android-assets.ps1`——把前端产物整包同步进 Android assets
+
+- `android/app/src/main/assets/www/` 是 gitignore 的，本机残留副本会随前端迭代悄悄过期（本轮发现里面还是 `index-DGw2NPIL.js` 那一版，且缺 `tessdata`、`tesseract`、`quick.html`——手机上等于没有离线取字）。
+- 脚本先清空再整包拷贝，校验文件数一致，输出体积；`android/README.md` 的构建第 2 步改成调它。已同步 13 个文件 11.5 MB。
+- `tools/shell-probe.mjs` 的 record flow 停止按钮正则从 `/停止/` 改成 `/结束录制|停止录制/`（实际文案是「结束录制」）。
+
+### 验证
+
+- 前端：`tsc --noEmit` 通过，`vitest run tests` 8 文件 64 条通过，`vite build` 通过。
+- 网页端 E2E：6 条全绿（标注保存 → 图库、本地取字出中文、贴图、Ctrl+V 粘贴、五种模式切换、图库与设置往返）。
+- 桌面壳真机（CDP）：`snap` 覆盖层 1920×1080 → 框 960×497 → 双击进标注台；`ocr` 走通并给出置信度/段落视图；`settings` 显示器小节在；`pin` 出 `pin.html` target；`quick` 修好后 1 秒出窗。
+- 录屏：`--record-probe` 30fps 90 帧出片（`backend=gdi`）。
+
+### 未做 / 环境限制
+
+- 本轮物理屏处于 Windows 锁屏（`--capture-probe` 抓到整屏纯色），录屏的**界面全流程**没能在锁屏态走完；链路本身由 `--record-probe` 与抽帧验证。
+- 长截图完整滚动、托盘菜单逐项点击仍需有桌面内容的环境；`save_png` 的另存为对话框要人点。
+- 安装包（NSIS/MSI）、混合 DPI 双屏仍缺真机样本。
+
+## v0.4 第十三批：覆盖层跟随鼠标屏 + 一次全模块真机自检（2026-11-28）
+
+### 新增：框选时主窗铺满鼠标所在的那块屏
+
+- `enter_overlay(display?)` / `exit_overlay()`：先记下窗口原来的位置与尺寸，再 `set_position` 到该屏原点并 `set_fullscreen(true)`；退出时按记录还原。原来的实现是「窗口内缩放视图」，副屏上按热键只会在主屏那一块里看到整屏缩略图。
+- 前端 `CaptureWorkspace` 在延迟结束后进出覆盖层：`start()` 先 `enterOverlay()`（等一帧 rAF + 260ms 让视口尺寸更新），再按同一 display 抓帧；`confirmRegion`/`onCancel`/`finish`/异常分支都 `exitOverlay()`，不把用户窗口留在全屏。
+- 设置页「桌面壳」panel 新增「显示器」小节：列 `#id 名称 · WxH · 主屏 · 原点`，并说明「在哪块屏按下就用哪块屏」。
+- `--overlay-probe`：不开界面，直接跑一遍「进全屏 → 打印 outer 位置尺寸 → 退出 → 再打印」。
+
+### 修：debug 构建白屏（构建链路的坑，不是界面代码）
+
+- `desktop/Cargo.toml` 增加 `[features] custom-protocol = ["tauri/custom-protocol"]`。`cargo build` 不经过 tauri CLI 时，`build.devUrl` 仍指向 `http://127.0.0.1:24118`，没有 dev server 就整窗白屏——这就是截图里那块白板的成因。
+- 构建脚本改为 `cargo build --features custom-protocol`，并在注释里写死「改前端后必须先 `npm run build`」。真机核对：窗口 URL 是 `http://tauri.localhost/`（嵌入资源），DOM、`__TAURI_INTERNALS__` 都在。
+
+### 修：双击「快速完成」失效
+
+- 双击的第二下 `pointerdown` 会先把拖框起点重置到双击处，选区瞬间变 0×0，等 `dblclick` 到达时 `rect` 已经不可用，于是「双击快速完成」怎么也收不了口（提示语与行为不一致）。
+- 现在留一份「最近一次可用选区」快照：第二次按下（`detail >= 2`）且落在该块内就直接收口；`dblclick` 兜底时也用快照而不是当前 rect，空白处双击仍然不会吞掉整屏。
+
+### 修：主键被 QQ 占满时自动换备用键位
+
+- 真机日志里 `Ctrl+Alt+S/R/C/O/F` 五组**全被其他程序占用**（QQ 客户端常年占着这一套）。原来只弹一条「已被占用，请从模式卡进入」——热键等于没有。
+- `shortcuts()` 每组模式给两档候选：主键 `Ctrl+Alt+X`，备用 `Ctrl+Shift+X`；注册循环按模式锁第一个能抢到的键，两档都抢不到才上报失败。
+- 走备用键时广播 `stillframe://shortcut-remap`，界面顶部出现蓝色提示「主键被占，已自动改用备用键位：截图 Ctrl+Shift+S」，不再让用户对着主键按半天没反应。
+
+### 新增：`tools/shell-probe.mjs`——用 CDP 接管真机窗口做验收
+
+- WebView2 开 `--remote-debugging-port=9223` 后，Playwright 可以 `connectOverCDP` 连上真实桌面壳，用同一套选择器点按钮、量视口、读 DOM。肉眼验收变成可复现的脚本。
+- 七条 flow：只读检查、`snap`（全屏→抓帧→拖框→双击→标注台）、`full`（整屏）、`ocr`（整屏离线识别）、`settings`（含显示器小节）、`quick`（快捷浮窗窗口）、`record`（框选录 4 秒出片）、`pin`（钉图窗口）。
+
+### 验证
+
+- 前端：`tsc --noEmit` 通过、`vitest run tests` 8 文件 64 条通过、`npm run build` 通过。
+- 桌面壳：`cargo build --features custom-protocol` 通过（余 3 条历史警告）。
+- 真机（单屏 1920×1080 @125%）：`snap` → 覆盖层视口 1920×1080、抓帧 `1920x1080`、拖框读数 `960 × 497`、双击进标注台后窗口回到 1180×780（覆盖层退出）；`full` 整屏进标注台；`ocr` 整屏识别出 16 段 560 字符（整屏含大量界面文字，置信度 43，框选小区域的精度仍以 OCR 基准为准）；`settings` 显示「显示器 · #65537 S2719DGF · 1920×1080 · 主屏 · 原点 (0, 0)」；`pin` 出现 `Stillframe Pin` 窗口（`http://tauri.localhost/pin.html`）；`quick` 出现 `quick.html` 窗口。
+- `--overlay-probe`：`enter=Ok(...) fullscreen=true outer=(0,0) 1920x1080`，`exit` 后回到 1493×1022（约 1180×780 逻辑 @125%）。
+
+### 未做
+
+- 安装包（NSIS/MSI）仍等 bundler 联网；混合 DPI 双屏没有真机样本。
+- 整屏 OCR 的版面质量一般（界面元素多），「框选后再识别」是正确用法，文档里再强调一次。
+
 ## v0.4 第十二批：多屏与混合 DPI——抓帧带几何、录制按虚拟桌面（2026-11-28）
 
 ### 新增：抓屏知道自己抓的是哪块屏

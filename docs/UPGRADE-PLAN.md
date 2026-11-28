@@ -395,6 +395,23 @@
 
 **未覆盖**：截图覆盖层仍只在主窗那块（窗口内缩放整屏），副屏按快捷键不会把窗口挪过去全屏——这是下一批「窗口跟随鼠标屏」。
 
+### 5.11 覆盖层跟随鼠标屏（G13 收口，已落地）
+
+`enter_overlay(display?)` 先记下窗口原位原尺寸，再 `set_position` 到该屏原点 + `set_fullscreen(true)`；`exit_overlay()` 按记录还原。前端在 `start()` 里「先 enterOverlay、等一帧 rAF + 260ms 让视口重新量过、再按同一 display 抓帧」，`confirmRegion` / `onCancel` / `finish` / 异常分支都要 `exitOverlay()`，不把用户窗口落在全屏。
+
+自检：`--overlay-probe` 直接打印 `全屏 display id=65537 origin=(0,0) 1920x1080 => outer=(0,0) 1920x1080` 与退出后的还原尺寸；CDP `--flow=snap` 侧看覆盖层视口确实是 1920×1080。
+
+### 5.12 抓帧后端降级与录制预检（G14，已落地）
+
+**问题**：远程会话 / 锁屏前态 / 显示器休眠时 `IDXGIOutputDuplication::AcquireNextFrame` 常驻超时，`DxgiGrabber` 一张帧都吐不出来，录制线程第一帧就 Err，成片是 262 B 空 MP4；界面上表现为「停止录制失败」。
+
+**方案**：
+1. `FrameGrabber` 在 DXGI 建成功时**同时**备一台 BitBlt（`gdi_fallback`）。`grab()` 一旦读到「还没拿到第一帧」，立即 `take()` 后备、把 backend 换成 `Gdi` 并锁死，不再每帧白等一次超时。
+2. `probe_recording_frame()` 在 `start_recording` 前跑：整屏抓一帧（最多 12 次 × 100ms，等屏幕切过全屏后合成器重绘），48×48 网格采样，全同色就拒绝并给可读原因。**只按整屏判**，不看框选区域——框选落在纯色壁纸、或窗口刚退出全屏还没重绘都是正常录制，按选区判会误杀（第一版确实误杀过，真机复现后改掉）。
+3. `open_quick` 改 `async fn`；`toggle_quick`（热键/托盘）与 setup 的 `--quick` 都用 `tauri::async_runtime::spawn`：Windows 上 `WebviewWindowBuilder::build()` 在主线程会自锁。
+
+**自检**：`--record-probe=<mp4>:<秒>` 出片并打印 `backend=gdi`；`tools/shell-selfcheck.mjs` 过一遍命令面，建窗类拆成 `--windows=quick|pin`（主窗被完全遮挡后 WebView2 会挂起主窗 JS，后续 invoke 全超时）。
+
 ## 6 质量与验收
 
 ### 6.1 单元测试

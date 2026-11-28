@@ -58,7 +58,7 @@ struct WindowInfo {
 }
 
 /// 一块显示器：`x/y` 是它在虚拟桌面上的原点（副屏在左时为负），`width/height` 是物理像素。
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 struct DisplayInfo {
     id: u32,
@@ -164,6 +164,112 @@ fn capture_frame(display: Option<u32>) -> Result<CapturedFrame, String> {
 #[tauri::command]
 fn capture_screen(display: Option<u32>) -> Result<String, String> {
     Ok(capture_frame(display)?.data_url)
+}
+
+// ---------- 全局热键的落地结果 ----------
+
+/// 一组热键的真实状态：前端启动时主动来问，不依赖 setup 那会儿的事件。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct HotkeyRow {
+    mode: String,
+    keys: String,
+    /// primary = 主键拿到；fallback = 主键被占、换备用键；unavailable = 两档都抢不到。
+    state: &'static str,
+}
+
+static HOTKEY_ROWS: std::sync::Mutex<Vec<HotkeyRow>> = std::sync::Mutex::new(Vec::new());
+
+#[tauri::command]
+fn hotkey_status() -> Vec<HotkeyRow> {
+    HOTKEY_ROWS
+        .lock()
+        .map(|rows| rows.clone())
+        .unwrap_or_default()
+}
+
+// ---------- 截图覆盖层：把主窗铺到目标那块屏 ----------
+
+/// 主窗是否正处在「全屏覆盖层」状态。退出时靠它判断要不要还原，避免误关别的全屏。
+static OVERLAY_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 进全屏前的窗口位置与尺寸（外部位置 + 内部尺寸），退出时原样还回去。
+/// 不还的话 Windows 只会把窗口恢复成「进入全屏时那块屏的大小」，看起来就是窗口自己变大了。
+static OVERLAY_PREV: std::sync::Mutex<Option<(i32, i32, u32, u32)>> = std::sync::Mutex::new(None);
+
+/// 把主窗铺到指定屏（默认鼠标所在屏）并全屏。
+///
+/// 全屏只覆盖「窗口所在」的那块显示器，所以必须先把窗口挪到目标屏原点再全屏；
+/// 顺序反了就在主屏上放大了副屏的内容。
+fn enter_overlay_inner(
+    window: &tauri::WebviewWindow,
+    display: Option<u32>,
+) -> Result<DisplayInfo, String> {
+    let monitor = pick_monitor(display)?;
+    let info = display_info(&monitor);
+    if let (Ok(position), Ok(inner)) = (window.outer_position(), window.inner_size()) {
+        if let Ok(mut slot) = OVERLAY_PREV.lock() {
+            *slot = Some((position.x, position.y, inner.width, inner.height));
+        }
+    }
+    if let Err(error) = window.set_position(tauri::PhysicalPosition::new(info.x, info.y)) {
+        log_line(&format!("[overlay] 移动窗口失败：{error}"));
+    }
+    window.set_fullscreen(true).map_err(err)?;
+    OVERLAY_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+    let moved = window
+        .outer_position()
+        .map(|position| (position.x, position.y))
+        .unwrap_or((0, 0));
+    let sized = window
+        .outer_size()
+        .map(|size| (size.width, size.height))
+        .unwrap_or((0, 0));
+    log_line(&format!(
+        "[overlay] 全屏 display id={} origin=({}, {}) {}x{} => outer=({}, {}) {}x{}",
+        info.id, info.x, info.y, info.width, info.height, moved.0, moved.1, sized.0, sized.1
+    ));
+    Ok(info)
+}
+
+/// 进入截图覆盖层：返回铺满的那块屏的几何，前端据此换算选区。
+#[tauri::command]
+fn enter_overlay(
+    display: Option<u32>,
+    window: tauri::WebviewWindow,
+) -> Result<DisplayInfo, String> {
+    enter_overlay_inner(&window, display)
+}
+
+/// 退出覆盖层：回到普通窗口的大小与位置。没进过全屏就直接返回，不碰窗口状态。
+fn exit_overlay_inner(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if !OVERLAY_ACTIVE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        return Ok(());
+    }
+    window.set_fullscreen(false).map_err(err)?;
+    let previous = OVERLAY_PREV.lock().ok().and_then(|mut slot| slot.take());
+    if let Some((x, y, width, height)) = previous {
+        if let Err(error) = window.set_size(tauri::PhysicalSize::new(width, height)) {
+            log_line(&format!("[overlay] 还原窗口尺寸失败：{error}"));
+        }
+        if let Err(error) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
+            log_line(&format!("[overlay] 还原窗口位置失败：{error}"));
+        }
+    }
+    let restored = window
+        .outer_size()
+        .map(|size| (size.width, size.height))
+        .unwrap_or((0, 0));
+    log_line(&format!(
+        "[overlay] 已退出全屏，还原为 {}x{}",
+        restored.0, restored.1
+    ));
+    Ok(())
+}
+
+#[tauri::command]
+fn exit_overlay(window: tauri::WebviewWindow) -> Result<(), String> {
+    exit_overlay_inner(&window)
 }
 
 /// 把贴图钉在屏幕上：独立、无边框、置顶、不进任务栏的窗口。
@@ -519,7 +625,9 @@ fn show_quick(app: &AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_quick(app: AppHandle) -> Result<(), String> {
+async fn open_quick(app: AppHandle) -> Result<(), String> {
+    // 必须是 async：Windows 上 WebView2 建窗要等主线程消息循环，
+    // 同步命令在主线程里 build() 会自锁，浮窗永远出不来。
     show_quick(&app)
 }
 
@@ -538,10 +646,15 @@ fn toggle_quick(app: &AppHandle) {
             return;
         }
     }
-    if let Err(error) = show_quick(app) {
-        log_line(&format!("[quick] 打开失败：{error}"));
-        eprintln!("[stillframe] 快捷浮窗打开失败：{error}");
-    }
+    // 建窗丢给后台线程：这条路径由热键 / 托盘触发，回调就在主线程上，
+    // 同步 build() 会把整个壳卡住（见 show_quick 的注释）。
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = show_quick(&handle) {
+            log_line(&format!("[quick] 打开失败：{error}"));
+            eprintln!("[stillframe] 快捷浮窗打开失败：{error}");
+        }
+    });
 }
 
 /// 浮窗里选了一个动作：收起浮窗、亮出主窗，并让前端直接进入该模式的捕捉。
@@ -574,41 +687,42 @@ fn quick_main(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 全局热键表：(快捷键, 前端模式名, 给用户看键位, 虚拟键码)。
-/// 后两项分别用于「告诉用户是哪一组」和「注册前先自己探一次」。
-fn shortcuts() -> Vec<(Shortcut, &'static str, &'static str, u32)> {
-    vec![
-        (
-            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyS),
-            "snap",
-            "Ctrl+Alt+S",
-            0x53,
-        ),
-        (
-            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyR),
-            "record",
-            "Ctrl+Alt+R",
-            0x52,
-        ),
-        (
-            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyC),
-            "scroll",
-            "Ctrl+Alt+C",
-            0x43,
-        ),
-        (
-            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyO),
-            "ocr",
-            "Ctrl+Alt+O",
-            0x4F,
-        ),
-        (
-            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyF),
-            "translate",
-            "Ctrl+Alt+F",
-            0x46,
-        ),
-    ]
+/// 全局热键表：(快捷键, 前端模式名, 给用户看键位, 探测用修饰键位, 虚拟键码)。
+///
+/// 每组模式给两档：主键 `Ctrl+Alt+X`（和 QQ 截图一致），备用 `Ctrl+Shift+X`。
+/// 本机上 QQ 客户端常年占着 Ctrl+Alt+S/R/C/O/F 这一套，注册不进去时不能只弹一句
+/// 「已被占用就请自己点界面」，得自己找一组能用的键，否则热键等于没有。
+fn shortcuts() -> Vec<(Shortcut, &'static str, &'static str, u32, u32)> {
+    // MOD_ALT=0x0001、MOD_CONTROL=0x0002、MOD_SHIFT=0x0004，和 Win32 的约定一致；
+    // 直接写字面量，非 Windows 目标编译这份表时也不依赖 windows crate。
+    const MOD_ALT: u32 = 0x0001;
+    const MOD_CONTROL: u32 = 0x0002;
+    const MOD_SHIFT: u32 = 0x0004;
+    let pairs: [(&'static str, Code, &'static str, u32, &'static str, u32); 5] = [
+        ("snap", Code::KeyS, "Ctrl+Alt+S", 0x53, "Ctrl+Shift+S", 0x53),
+        ("record", Code::KeyR, "Ctrl+Alt+R", 0x52, "Ctrl+Shift+R", 0x52),
+        ("scroll", Code::KeyC, "Ctrl+Alt+C", 0x43, "Ctrl+Shift+C", 0x43),
+        ("ocr", Code::KeyO, "Ctrl+Alt+O", 0x4F, "Ctrl+Shift+O", 0x4F),
+        ("translate", Code::KeyF, "Ctrl+Alt+F", 0x46, "Ctrl+Shift+F", 0x46),
+    ];
+    let mut table = Vec::with_capacity(pairs.len() * 2);
+    for (mode, code, keys, vk, alt_keys, _alt_vk) in pairs {
+        table.push((
+            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), code),
+            mode,
+            keys,
+            MOD_CONTROL | MOD_ALT,
+            vk,
+        ));
+        table.push((
+            Shortcut::new(Some(Modifiers::CONTROL | Modifiers::SHIFT), code),
+            mode,
+            alt_keys,
+            MOD_CONTROL | MOD_SHIFT,
+            vk,
+        ));
+    }
+    table
 }
 
 /// 注册前先自己探一次：`RegisterHotKey` 成功就立刻注销，能真拿到才算可用。
@@ -616,13 +730,12 @@ fn shortcuts() -> Vec<(Shortcut, &'static str, &'static str, u32)> {
 /// 不能只看插件的返回值——实测 Ctrl+Alt+S 被别的工具占用（系统错误 1409）时，
 /// `on_shortcut` 依然返回 Ok，失败被吞掉了，界面上就永远等不到提示。
 #[cfg(windows)]
-fn hotkey_available(vk: u32) -> bool {
+fn hotkey_available(mods: u32, vk: u32) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL,
+        RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS,
     };
     const PROBE_ID: i32 = 0x5350;
-    let mods = MOD_ALT | MOD_CONTROL;
-    let taken = unsafe { RegisterHotKey(None, PROBE_ID, mods, vk) }.is_ok();
+    let taken = unsafe { RegisterHotKey(None, PROBE_ID, HOT_KEY_MODIFIERS(mods), vk) }.is_ok();
     if taken {
         let _ = unsafe { UnregisterHotKey(None, PROBE_ID) };
     }
@@ -630,7 +743,7 @@ fn hotkey_available(vk: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-fn hotkey_available(_vk: u32) -> bool {
+fn hotkey_available(_mods: u32, _vk: u32) -> bool {
     true
 }
 
@@ -1158,6 +1271,15 @@ fn start_recording(
         return Err("已经在录制，先结束当前这段".to_string());
     }
     let fps = fps.unwrap_or(30).clamp(5, 60);
+    // 先确认整屏能取到画面：锁屏 / 远程会话断开 / 显示器休眠时录出来是纯色，
+    // 与其让用户录完再发现，不如点「开始录制」就当场说清楚。
+    #[cfg(windows)]
+    {
+        if let Err(message) = win_capture::probe_recording_frame() {
+            log_line(&format!("[record] 预检不通过：{message}"));
+            return Err(message);
+        }
+    }
     // 新的一段录像从空白标注开始：上一段画过的内容不能跟过来。
     clear_record_annotations();
     let out = recorder::recordings_dir().join(format!(
@@ -1483,6 +1605,8 @@ pub fn run() {
             capture_screen,
             capture_frame,
             displays,
+            enter_overlay,
+            exit_overlay,
             capture_window,
             read_tessdata,
             pin_image,
@@ -1505,7 +1629,8 @@ pub fn run() {
             quick_main,
             app_info,
             autostart_enabled,
-            set_autostart
+            set_autostart,
+            hotkey_status
         ])
         .on_window_event(|window, event| {
             // 关窗只收进托盘，不杀进程：抓屏、热键、录屏都要壳活着。
@@ -1533,13 +1658,18 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 use tauri_plugin_global_shortcut::GlobalShortcutExt;
-                for (shortcut, mode, keys, vk) in shortcuts() {
-                    // 插件被占用时不一定报错，所以先自己探：探不到就直接记账，别再指望返回值。
-                    if !hotkey_available(vk) {
+                // 同一模式可能有两档候选（Ctrl+Alt+X 主键、Ctrl+Shift+X 备用）：
+                // 先到的能用就锁住这个模式，后面的候选跳过，避免一键注册两条。
+                let mut bound: Vec<&'static str> = Vec::new();
+                let mut rows: Vec<HotkeyRow> = Vec::new();
+                let known = ["snap", "record", "scroll", "ocr", "translate"];
+                for (shortcut, mode, keys, mods, vk) in shortcuts() {
+                    if bound.contains(&mode) {
+                        continue;
+                    }
+                    // 插件被占用时不一定报错，所以先自己探：探不到就换下一档候选。
+                    if !hotkey_available(mods, vk) {
                         log_line(&format!("[hotkey] {keys} -> {mode} 已被其他程序占用"));
-                        let _ = app
-                            .handle()
-                            .emit("stillframe://shortcut-failed", format!("{mode}|{keys}"));
                         continue;
                     }
                     let handle = app.handle().clone();
@@ -1550,17 +1680,55 @@ pub fn run() {
                             let _ = handle.emit("stillframe://shortcut", mode);
                         }
                     });
-                    if let Err(err) = result {
-                        log_line(&format!("[hotkey] {keys} -> {mode} 注册失败：{err}"));
-                        // 静默失败等于骗人：把「哪组键没抢到」明确告诉界面。
-                        let _ = app
-                            .handle()
-                            .emit("stillframe://shortcut-failed", format!("{mode}|{keys}"));
+                    match result {
+                        Ok(()) => {
+                            bound.push(mode);
+                            log_line(&format!("[hotkey] {keys} -> {mode} 生效"));
+                            let fallback = keys.contains("Shift");
+                            if fallback {
+                                let _ = app
+                                    .handle()
+                                    .emit("stillframe://shortcut-remap", format!("{mode}|{keys}"));
+                            }
+                            rows.push(HotkeyRow {
+                                mode: mode.to_string(),
+                                keys: keys.to_string(),
+                                state: if fallback { "fallback" } else { "primary" },
+                            });
+                        }
+                        Err(err) => {
+                            log_line(&format!("[hotkey] {keys} -> {mode} 注册失败：{err}"));
+                        }
                     }
                 }
 
+                // 两档都抢不到的模式才提示「用界面进」：静默失败等于骗人。
+                for mode in known {
+                    if bound.contains(&mode) {
+                        continue;
+                    }
+                    let label = shortcuts()
+                        .into_iter()
+                        .filter(|(_, m, _, _, _)| *m == mode)
+                        .map(|(_, _, keys, _, _)| keys)
+                        .collect::<Vec<_>>()
+                        .join(" / ");
+                    log_line(&format!("[hotkey] {mode} 两档键位都不可用：{label}"));
+                    let _ = app
+                        .handle()
+                        .emit("stillframe://shortcut-failed", format!("{mode}|{label}"));
+                    rows.push(HotkeyRow {
+                        mode: mode.to_string(),
+                        keys: label,
+                        state: "unavailable",
+                    });
+                }
+                if let Ok(mut slot) = HOTKEY_ROWS.lock() {
+                    *slot = rows;
+                }
+
                 // Ctrl+Alt+Q 只负责叫出/收起快捷浮窗：作为主窗最小化时的常驻入口。
-                if !hotkey_available(0x51) {
+                if !hotkey_available(0x0002 | 0x0001, 0x51) {
                     log_line("[hotkey] Ctrl+Alt+Q -> quick 已被其他程序占用");
                     let _ = app
                         .handle()
@@ -1589,10 +1757,14 @@ pub fn run() {
             let _ = app.get_webview_window("main");
             log_line(&format!("[boot] start_quick={start_quick}"));
             if start_quick {
-                if let Err(error) = show_quick(app.handle()) {
-                    log_line(&format!("[quick] --quick 启动失败：{error}"));
-                    eprintln!("[stillframe] --quick 启动失败：{error}");
-                }
+                // 同样别在 setup 里同步建：主窗还没跑起来，建浮窗会拖住启动。
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = show_quick(&handle) {
+                        log_line(&format!("[quick] --quick 启动失败：{error}"));
+                        eprintln!("[stillframe] --quick 启动失败：{error}");
+                    }
+                });
             }
 
             // 托盘常驻：关窗不退出，左键点托盘或菜单「显示主窗口」都回到界面。
@@ -1654,9 +1826,13 @@ pub fn run() {
                                         let _ = app.emit("stillframe://shortcut", "snap");
                                     }
                                     "tray-quick" => {
-                                        if let Err(error) = show_quick(app) {
-                                            log_line(&format!("[tray] 快捷浮窗失败：{error}"));
-                                        }
+                                        // 托盘回调在主线程，建窗必须转后台，否则菜单点一下就卡死
+                                        let handle = app.clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            if let Err(error) = show_quick(&handle) {
+                                                log_line(&format!("[tray] 快捷浮窗失败：{error}"));
+                                            }
+                                        });
                                     }
                                     "tray-quit" => app.exit(0),
                                     _ => {}
@@ -1698,6 +1874,35 @@ pub fn run() {
                         )),
                         Err(_) => log_line("[tray] 构建时崩溃，已跳过；关窗即退出"),
                     }
+                });
+            }
+
+            // --overlay-probe：等主窗出来，自己进一次截图覆盖层，量一下外框是否真的铺满屏，
+            // 再退出全屏、记录还原后的外框，然后直接退出。窗口状态的回归全靠它。
+            if std::env::args().any(|arg| arg == "--overlay-probe") {
+                let probe_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let Some(window) = probe_handle.get_webview_window("main") else {
+                        log_line("[overlay-probe] 拿不到主窗，放弃");
+                        std::process::exit(1);
+                    };
+                    let entered = enter_overlay_inner(&window, None);
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let full = window.is_fullscreen();
+                    log_line(&format!(
+                        "[overlay-probe] enter={entered:?} fullscreen={full:?} outer={:?} size={:?}",
+                        window.outer_position(),
+                        window.outer_size()
+                    ));
+                    let exited = exit_overlay_inner(&window);
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    log_line(&format!(
+                        "[overlay-probe] exit={exited:?} fullscreen={:?} outer={:?} size={:?}",
+                        window.is_fullscreen(),
+                        window.outer_position(),
+                        window.outer_size()
+                    ));                    std::process::exit(0);
                 });
             }
             Ok(())

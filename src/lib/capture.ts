@@ -31,6 +31,8 @@ interface NativeOptions {
   intervalMs?: number;
   /** 抓帧失败时的回调，默认静默（用户可能中途取消了授权）。 */
   onError?: (error: unknown) => void;
+  /** 指定抓哪块屏（显示器 id）。不给就按鼠标所在屏，之后钉住它。 */
+  display?: number;
 }
 
 export function displayCaptureSupported(): boolean {
@@ -86,8 +88,8 @@ export async function openNativeSession(options: NativeOptions = {}): Promise<Ca
   // 先按鼠标所在屏抓第一帧，之后钉住这块屏（display id）：轮询途中鼠标挪到别的屏，
   // 画面不能跟着跳，否则长图拼接与录制选区全错位。
   // capture_frame 是后加的命令，老壳没有就退回只抓画面（origin 按 0,0 处理）。
-  const first = await nativeCaptureFrame().catch(() => null);
-  const fallback = first ? null : await nativeCaptureScreen();
+  const first = await nativeCaptureFrame(options.display).catch(() => null);
+  const fallback = first ? null : await nativeCaptureScreen(options.display);
   if (!first && !fallback) throw new Error('原生宿主不可用');
   const canvas = document.createElement('canvas');
   const image = first?.canvas ?? fallback!;

@@ -95,6 +95,28 @@ export async function nativeDisplays(): Promise<HostDisplay[]> {
   }
 }
 
+export interface HostHotkey {
+  mode: string;
+  keys: string;
+  /** primary：主键拿到；fallback：主键被占、走备用键；unavailable：两档都抢不到。 */
+  state: 'primary' | 'fallback' | 'unavailable';
+}
+
+/**
+ * 全局热键的落地结果。setup 里发的事件常常早于前端订阅，
+ * 所以界面启动时要主动问一次，不能靠「没收到就是没事」。
+ */
+export async function nativeHotkeyStatus(): Promise<HostHotkey[]> {
+  const invoke = desktopInvoke();
+  if (!invoke) return [];
+  try {
+    const rows = await invoke('hotkey_status');
+    return Array.isArray(rows) ? (rows as HostHotkey[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * 抓一块屏（不给 id 就是鼠标所在屏），并带回这块屏的几何。
  * 前端靠 display 的 x/y 把「图内坐标」换成「屏幕绝对坐标」：
@@ -124,8 +146,26 @@ export async function nativeCaptureFrame(
   return { canvas: await dataUrlToCanvas(payload.dataUrl), display: displayInfo };
 }
 
-/** 原生整屏抓帧。浏览器环境返回 null。 */
-export async function nativeCaptureScreen(): Promise<HTMLCanvasElement | null> {
+/**
+ * 进入截图覆盖层：主窗铺满鼠标所在那块屏并全屏，返回那块屏的几何。
+ * 全屏只覆盖窗口所在显示器，所以移动 + 全屏这一步必须由壳来做，前端只等结果。
+ */
+export async function nativeEnterOverlay(display?: number): Promise<HostDisplay | null> {
+  const invoke = desktopInvoke();
+  if (!invoke) return null;
+  const info = (await invoke('enter_overlay', { display })) as HostDisplay | null;
+  return info ?? null;
+}
+
+/** 退出覆盖层，回到普通窗口。没进过全屏时壳里直接返回，不碰窗口状态。 */
+export async function nativeExitOverlay(): Promise<void> {
+  const invoke = desktopInvoke();
+  if (!invoke) return;
+  await invoke('exit_overlay');
+}
+
+/** 原生整屏抓帧。不给 display 就抓鼠标所在屏；浏览器环境返回 null。 */
+export async function nativeCaptureScreen(display?: number): Promise<HTMLCanvasElement | null> {
   const bridge = androidBridge();
   if (bridge?.captureScreen) {
     if (bridge.hasCapture && !bridge.hasCapture()) {
@@ -142,7 +182,7 @@ export async function nativeCaptureScreen(): Promise<HTMLCanvasElement | null> {
 
   const invoke = desktopInvoke();
   if (!invoke) return null;
-  const payload = await invoke('capture_screen');
+  const payload = await invoke('capture_screen', { display });
   if (typeof payload !== 'string' || !payload.startsWith('data:image')) {
     throw new Error('原生命令没有返回图像');
   }

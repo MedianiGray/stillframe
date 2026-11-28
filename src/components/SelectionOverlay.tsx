@@ -29,6 +29,9 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
   const [mods, setMods] = useState({ alt: false, shift: false });
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
   const [probe, setProbe] = useState<{ hex: string; r: number; g: number; b: number } | null>(null);
+  // 双击收口用：第二次按下的 pointerdown 会把拖框起点重置成当前点（选区瞬间变 0×0），
+  // 等 dblclick 事件到达时 rect 已经不是用户框好的那块了。这里留一份「最近一次可用选区」。
+  const lastUsable = useRef<Rect | null>(null);
   const magRef = useRef<HTMLCanvasElement | null>(null);
   const probeRef = useRef<HTMLCanvasElement | null>(null);
   const dataUrl = useMemo(() => frame.toDataURL('image/png'), [frame]);
@@ -136,10 +139,22 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
 
   const full = { x: 0, y: 0, w: viewport.w, h: viewport.h };
 
+  useEffect(() => {
+    if (rect && isSelectionUsable(rect)) lastUsable.current = rect;
+  }, [rect]);
+
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
-    (event.target as HTMLElement).setPointerCapture?.(event.pointerId);
+    // 双击的第二次按下：如果上一块选区仍然可用、而且点在选区里，直接按它收口。
+    // QQ 的「双击快速完成」就是这个手感，不能让它被 pointerdown 的重新起框吃掉。
+    const prev = lastUsable.current;
     const point = toScreen(event.clientX, event.clientY);
+    if (event.detail >= 2 && prev && point.x >= prev.x && point.x <= prev.x + prev.w && point.y >= prev.y && point.y <= prev.y + prev.h) {
+      dragRef.current = null;
+      commit(prev);
+      return;
+    }
+    (event.target as HTMLElement).setPointerCapture?.(event.pointerId);
     const next = { startX: point.x, startY: point.y, currentX: point.x, currentY: point.y };
     dragRef.current = next;
     setDrag(next);
@@ -170,9 +185,21 @@ export function SelectionOverlay({ frame, hint, onCancel, onConfirm }: Selection
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      onDoubleClick={() => {
-        // 只有已经框出可用选区时双击才收口；空白处双击不该直接吞掉整屏。
-        if (rect && isSelectionUsable(rect)) commit(rect);
+      onDoubleClick={(event) => {
+        // 双击的第二下会先把拖框起点重置到双击处（rect 变成 0×0），所以这里优先用
+        // 「最近一次可用选区」；双击点必须落在那块里，空白处双击不会吞掉整屏。
+        const area =
+          rect && isSelectionUsable(rect)
+            ? rect
+            : (() => {
+                const prev = lastUsable.current;
+                if (!prev) return null;
+                const point = toScreen(event.clientX, event.clientY);
+                const inside =
+                  point.x >= prev.x && point.x <= prev.x + prev.w && point.y >= prev.y && point.y <= prev.y + prev.h;
+                return inside ? prev : null;
+              })();
+        if (area) commit(area);
       }}
       onContextMenu={(event) => {
         event.preventDefault();
